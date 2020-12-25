@@ -1,0 +1,22 @@
+[package]
+name = "sirpingsalot"
+version = "0.1.0"
+authors = ["Steve <stevemflanagan@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[profile.release]
+debug = false
+lto = true
+codegen-units=1
+opt-level = 3
+#panic = 'abort'  # does cleanup upon panics
+#trustflags = ["-C", "target-cpu=native"]
+
+[dependencies]
+humantime = "2.0.1"
+anyhow = "1.0.36"
+rand = "0.8.0"
+socket2 = "0.3.19"
+structopt = "0.3.21"
