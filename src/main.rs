@@ -19,6 +19,8 @@ use std::convert::{TryInto, Infallible};
 use structopt::StructOpt;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::fmt::{Display, Formatter};
+use socket2::SockAddr;
 
 #[derive(Debug, Clone)]
 pub struct FDur(Duration);
@@ -177,7 +179,7 @@ fn run() -> ResultS<()> {
     }
     //let cfg = Config::from(&args)?;
 
-    println!("starting....");
+    println!("[{}]  starting....", format_rfc3339_millis(SystemTime::now()));
 
     let mut threads = vec![];
     let mut tracks = vec![];
@@ -199,7 +201,7 @@ fn run() -> ResultS<()> {
                 let st = SystemTime::now();
                 seq_cnt = seq_cnt.wrapping_add(1);
                 match res {
-                    Ok(reply) => {
+                    Ok((ret_size, ret_sockaddr, ret_ident, ret_seqcnt)) => {
                         stats.work.fetch_add(1, Ordering::Relaxed);
                         let micros = (dur.as_nanos() / 1000) as u64;
                         stats.time_sum_us.fetch_add(micros, Ordering::Relaxed);
@@ -208,7 +210,8 @@ fn run() -> ResultS<()> {
                         if verbose > 0 {
                             println!("[{}]  success for ip: {} in {}", format_rfc3339_millis(st), &ip, format_duration_mine(dur));
                             if verbose > 1 {
-                                println!("\tident: {} seq_cnt {}  ", reply.0, reply.1);
+                                let ip_disp = SockAddrWrap{wrap: &ret_sockaddr};
+                                println!("\tret addr: {} ret size: {} ident: {} seq_cnt {}  ", ip_disp, ret_size, ret_ident, ret_seqcnt);
                             }
                         }
                     }
@@ -259,7 +262,6 @@ fn run() -> ResultS<()> {
                     } else {
                         println!("[{}] ip: {}  worked: {}  failed: {}",
                                  format_rfc3339_millis(st), &ip, worked, failed);
-
                     }
                 }
             }
@@ -284,3 +286,20 @@ fn to_addr(s: &str) -> ResultS<IpAddr> {
         Ok(snew.to_socket_addrs().with_context(|| format!("unknown host for \"{}\"", s))?.next().expect("no IP address found for host").ip())
     }
 }
+
+struct SockAddrWrap<'a> {
+    wrap: &'a SockAddr
+}
+
+impl Display for SockAddrWrap<'_> {
+    fn fmt(& self, f: &mut Formatter<'_>) -> fmt::Result {
+        if let Some(ip) = self.wrap.as_inet() {
+            write!(f, "ipv4: {}", ip)
+        } else if let Some(ip) = self.wrap.as_inet6() {
+            write!(f, "ipv6: {}", ip)
+        } else {
+            write!(f, "{:?}", &self.wrap)
+        }
+    }
+}
+
