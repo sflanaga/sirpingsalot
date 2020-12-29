@@ -2,8 +2,10 @@ use std::time::{Duration, SystemTime};
 use std::fmt;
 use socket2::SockAddr;
 use std::fmt::{Display, Formatter};
+use std::net::IpAddr;
+use crate::stop::Stop;
 
-pub fn sleep_until_next_interval_on(interval: Duration) {
+pub fn sleep_until_next_interval_on(stop: &mut Stop, interval: Duration) -> bool {
     let now = SystemTime::now();
     let ep_dur = now.duration_since(SystemTime::UNIX_EPOCH).expect("UNIX_EPOCH should always be less than now");
 
@@ -11,7 +13,7 @@ pub fn sleep_until_next_interval_on(interval: Duration) {
     let sleep_time = Duration::from_nanos(this_sleep_time as u64);
 
     // we do not care about the spurious wake up... well, not that much anyway
-    std::thread::sleep(sleep_time);
+    stop.sleep(sleep_time)
 }
 
 

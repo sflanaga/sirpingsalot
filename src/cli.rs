@@ -4,6 +4,7 @@ use std::net::{IpAddr, ToSocketAddrs};
 use humantime::parse_duration;
 use std::str::FromStr;
 use anyhow::{anyhow,Context};
+use std::fmt;
 
 type ResultS<T> = std::result::Result<T, anyhow::Error>;
 
@@ -29,7 +30,7 @@ pub struct Config {
 
     #[structopt(parse(try_from_str = to_addr))]
     /// list of IPs or hostnames
-    pub ips: Vec<IpAddr>,
+    pub ips: Vec<HostInfo>,
 
     #[structopt(short = "v", parse(from_occurrences))]
     /// verbosity - good for testing.
@@ -37,12 +38,12 @@ pub struct Config {
     pub verbose: usize,
 }
 
-fn to_addr(s: &str) -> ResultS<IpAddr> {
+fn to_addr(s: &str) -> ResultS<HostInfo> {
     match s.to_socket_addrs() {
         Ok(mut ip) => {
             if let Some(x) = ip.next() {
                 println!("to addr ip: {}", x.ip());
-                Ok(x.ip())
+                Ok(HostInfo::new(None,x.ip()))
             } else {
                 Err(anyhow!("error in look or address interpretation for \"{}\"", s))
             }
@@ -50,7 +51,7 @@ fn to_addr(s: &str) -> ResultS<IpAddr> {
         Err(e) => {
             match IpAddr::from_str(s) {
                 Ok(ip) => {
-                    Ok(ip)
+                    Ok(HostInfo::new(None,ip))
                 }
                 Err(e) => {
                     let mut snew: String = String::from(s);
@@ -59,11 +60,35 @@ fn to_addr(s: &str) -> ResultS<IpAddr> {
                         .to_socket_addrs()
                         .with_context(|| format!("unknown host or IP for \"{}\" using faked port 22", s))?
                         .next().expect("no IP address found for host").ip();
-                    println!("to addr (with :0 added) ip: {}", &x);
-                    Ok(x)
+                    Ok(HostInfo::new(Some(String::from(s)),x))
                     // Err(anyhow!("tried to parse \"{}\" as ip address and cannot, error: {}", s, e))
                 }
             }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct HostInfo {
+    pub host: Option<String> ,
+    pub ip: IpAddr,
+}
+
+impl HostInfo {
+    pub fn new(host:Option<String>, ip: IpAddr) -> HostInfo {
+        HostInfo {
+            host,
+            ip,
+        }
+    }
+}
+
+impl fmt::Display for HostInfo {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.host.is_none() {
+            write!(f, "{}", self.ip)
+        } else {
+            write!(f, "{}({})", self.host.as_ref().unwrap(), self.ip)
         }
     }
 }

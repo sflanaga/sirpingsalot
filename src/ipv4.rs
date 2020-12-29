@@ -19,6 +19,7 @@ impl IpV4Protocol {
 
 pub struct IpV4Packet<'a> {
     pub protocol: IpV4Protocol,
+    pub ttl: u8,
     pub data: &'a [u8],
 }
 
@@ -31,7 +32,7 @@ impl<'a> IpV4Packet<'a> {
         let byte0 = data[0];
         let version = (byte0 & 0xf0) >> 4;
         let header_size = 4 * ((byte0 & 0x0f) as usize);
-
+        let ttl = data[8];
         if version != 4 {
 //            return Err(Error::InvalidVersion);
             return Err(anyhow!("invalid version of {} expected {}", version, 4))
@@ -49,6 +50,7 @@ impl<'a> IpV4Packet<'a> {
 
         Ok(Self {
             protocol: protocol,
+            ttl,
             data: &data[header_size..],
         })
     }
