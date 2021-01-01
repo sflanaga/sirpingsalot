@@ -1,10 +1,12 @@
-use std::net::{SocketAddr, IpAddr};
+use std::fmt::Write;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
+
 use anyhow::{anyhow, Context, Result};
 use rand::random;
-use socket2::{Domain, Protocol, Socket, Type, SockAddr};
+use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use crate::icmp::{EchoRequest, IcmpV4, IcmpV6, EchoReply, HEADER_SIZE as ICMP_HEADER_SIZE};
+use crate::icmp::{EchoReply, EchoRequest, HEADER_SIZE as ICMP_HEADER_SIZE, IcmpV4, IcmpV6};
 use crate::ipv4::IpV4Packet;
 
 const TOKEN_SIZE: usize = 24;
@@ -12,8 +14,10 @@ const ECHO_REQUEST_BUFFER_SIZE: usize = ICMP_HEADER_SIZE + TOKEN_SIZE;
 
 type Token = [u8; TOKEN_SIZE];
 
-pub fn ping(addr: IpAddr, timeout: Option<Duration>, ttl: Option<u32>, ident: Option<u16>, seq_cnt: Option<u16>, payload: Option<&Token>, verbose: usize)
-            -> Result<(usize, SockAddr, u16, u16, u8), anyhow::Error> {
+pub fn ping(addr: IpAddr, timeout: Option<Duration>, ttl: Option<u32>,
+            ident: Option<u16>, seq_cnt: Option<u16>, payload: Option<&Token>, verbose: usize,
+            msg_buf: &mut String, record_raw_bits: bool)
+            -> Result<(usize, SockAddr, u8, u8, u16, u16, u8), anyhow::Error> {
     let timeout = match timeout {
         Some(timeout) => Some(timeout),
         None => Some(Duration::from_secs(4)),
@@ -68,8 +72,9 @@ pub fn ping(addr: IpAddr, timeout: Option<Duration>, ttl: Option<u32>, ident: Op
     let (size, sockaddr) = socket.recv_from(&mut buffer)
         .with_context(|| format!("error from recv_from: {}:{}",file!(), line!()))?;
 
-    if verbose > 2 {
-        println!("ip: {} pkt size: {} data: {:02X?}", addr, size, &buffer[0..size]);
+    if record_raw_bits {
+        msg_buf.clear();
+        write!(msg_buf, "ip: {} pkt size: {} raw data: {:02X?}", addr, size, &buffer[0..size]);
     }
 
     let reply = if dest.is_ipv4() {
@@ -77,7 +82,7 @@ pub fn ping(addr: IpAddr, timeout: Option<Duration>, ttl: Option<u32>, ident: Op
         let ipv4_packet = IpV4Packet::decode(&buffer)?;
         let reply = EchoReply::decode::<IcmpV4>(ipv4_packet.data)
             .with_context(|| format!("error from EchoReply::decode ipv4: {}:{}",file!(), line!()))?;
-        return Ok((size, sockaddr, reply.ident, reply.seq_cnt, ipv4_packet.ttl));
+        return Ok((size, sockaddr, reply.type_, reply.code, reply.ident, reply.seq_cnt, ipv4_packet.ttl));
         // {
         //     Ok(reply) => reply,
         //     Err(_) => return Err(ErrorKind::InternalError.into()),
@@ -86,6 +91,6 @@ pub fn ping(addr: IpAddr, timeout: Option<Duration>, ttl: Option<u32>, ident: Op
         if verbose > 2 { println!("response received - now decoding ipv6 {},{}", file!(), line!()); }
         let reply = EchoReply::decode::<IcmpV6>(&buffer)
             .with_context(|| format!("error from EchoReply::decode ipv4: {}:{}",file!(), line!()))?;
-        return Ok((size, sockaddr, reply.ident, reply.seq_cnt, 0));
+        return Ok((size, sockaddr, reply.type_, reply.code, reply.ident, reply.seq_cnt, 0));
     };
 }

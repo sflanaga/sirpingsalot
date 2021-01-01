@@ -54,6 +54,8 @@ impl<'a> EchoRequest<'a> {
 }
 
 pub struct EchoReply<'a> {
+    pub type_: u8,
+    pub code: u8,
     pub ident: u16,
     pub seq_cnt: u16,
     pub payload: &'a [u8]
@@ -77,7 +79,7 @@ impl<'a> EchoReply<'a> {
         let payload = &buffer[HEADER_SIZE..];
 
         Ok(EchoReply {
-            ident, seq_cnt, payload
+            type_, code, ident, seq_cnt, payload
         })
     }
 }

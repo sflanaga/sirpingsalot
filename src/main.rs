@@ -51,10 +51,10 @@ fn run() -> Result<()> {
     for (no, ip) in cfg.ips.iter().enumerate() {
         let mut stats = Arc::new(Stats::new());
         tracks.push(stats.clone());
-        let (ip, verbose, interval, timeout, stats) = (ip.clone(), cfg.verbose, cfg.interval, cfg.timeout, stats.clone());
+        let (ip, raw_write_odd, verbose, interval, timeout, stats) = (ip.clone(), cfg.raw_write_odd, cfg.verbose, cfg.interval, cfg.timeout, stats.clone());
         threads.push(std::thread::Builder::new()
             .name(format!("ping{}", no))
-            .spawn(move || ping_thread(ip, verbose, interval, timeout, stats))?);
+            .spawn(move || ping_thread(ip, raw_write_odd, verbose, interval, timeout, stats))?);
     }
     if cfg.verbose > 1 {
         println!("all ping threads started");
@@ -76,6 +76,10 @@ fn run() -> Result<()> {
             .spawn(move || stats_thread(stop, interval, ip_list, tracks))?;
     } else {
         println!("no stats tracking started");
+        while !stop.sleep(Duration::from_secs(60)) {
+            ;
+        }
+        std::process::exit(0);
     }
 
     for h in threads {
@@ -84,38 +88,46 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn ping_thread(hostinfo: HostInfo, verbose: usize, interval: Duration, timeout: Duration, stats: Arc<Stats>) {
+fn ping_thread(hostinfo: HostInfo, raw_write_odd: bool, verbose: usize, interval: Duration, timeout: Duration, stats: Arc<Stats>) {
     const PING_IDENT: u16 = 2112;
     let mut seq_cnt = 0u16;
     println!("starting thread for {}", &hostinfo);
     let mut buff = String::with_capacity(128);
+    let mut raw_pack_info = String::with_capacity(128);
+    let record_raw_bits = raw_write_odd || verbose > 2;
     loop {
         let now = Instant::now();
         let res = ping::ping(hostinfo.ip, Some(timeout),
-                             Some(255), Some(PING_IDENT), Some(seq_cnt), None, verbose);
+                             Some(255), Some(PING_IDENT), Some(seq_cnt), None, verbose, &mut raw_pack_info, record_raw_bits);
         let dur = now.elapsed();
         let st = SystemTime::now();
         let iii = 100;
         match res {
-            Ok((ret_size, ret_sockaddr, ret_ident, ret_seqcnt, ret_hops)) => {
+            Ok((ret_size, ret_sockaddr, ret_type, ret_code, ret_ident, ret_seqcnt, ret_hops)) => {
                 let micros = (dur.as_nanos() / 1000) as u64;
-                stats.update_micros_working(micros);
+                if ret_type != 0 && ret_type != 129 {
+                    stats.update_micros_non_reply(micros);
+                } else {
+                    stats.update_micros_working(micros);
+                }
 
-                if ret_ident != PING_IDENT || seq_cnt != ret_seqcnt {
-                    buff.clear();
-                    use std::fmt::Write;
-                    writeln!(&mut buff, "[{}] response differences for {}", format_rfc3339_millis(st), &hostinfo);
-                    if hostinfo.ip != ret_sockaddr.as_std().unwrap().ip() {
-                        let ret_ip_disp = SockAddrWrap { wrap: &ret_sockaddr };
-                        writeln!(&mut buff, "\tIpAddr sent: {}  return: {}", hostinfo.ip, ret_ip_disp);
+                if raw_write_odd {
+                    if ret_ident != PING_IDENT || seq_cnt != ret_seqcnt {
+                        buff.clear();
+                        use std::fmt::Write;
+                        writeln!(&mut buff, "[{}] response differences for {} time={}", format_rfc3339_millis(st), &hostinfo, util::format_duration_mine(dur));
+                        if hostinfo.ip != ret_sockaddr.as_std().unwrap().ip() {
+                            let ret_ip_disp = SockAddrWrap { wrap: &ret_sockaddr };
+                            writeln!(&mut buff, "\tIpAddr sent: {}  return: {}", hostinfo.ip, ret_ip_disp);
+                        }
+                        if ret_ident != PING_IDENT {
+                            writeln!(&mut buff, "\tident: sent: {}  return: {}", PING_IDENT, ret_ident);
+                        }
+                        if seq_cnt != ret_seqcnt {
+                            writeln!(&mut buff, "\tseqcnt: sent: {}  return: {}", seq_cnt, ret_seqcnt);
+                        }
+                        println!("{}\tRAW:{}", &buff, &raw_pack_info);
                     }
-                    if ret_ident != PING_IDENT {
-                        writeln!(&mut buff, "\tdent: sent: {}  return: {}", PING_IDENT, ret_ident);
-                    }
-                    if seq_cnt != ret_seqcnt {
-                        writeln!(&mut buff, "\tseqcnt: sent: {}  return: {}", seq_cnt, ret_seqcnt);
-                    }
-                    println!("{}", &buff);
                 }
 
                 if verbose > 0 {
@@ -133,7 +145,10 @@ fn ping_thread(hostinfo: HostInfo, verbose: usize, interval: Duration, timeout: 
                     }
                     if verbose > 1 {
                         let ret_ip_disp = SockAddrWrap { wrap: &ret_sockaddr };
-                        println!("\tret addr: {} ret size: {} ident: {} seq_cnt {}  ", ret_ip_disp, ret_size, ret_ident, ret_seqcnt);
+                        println!("\tret addr: {} ret size: {} ident: {} seq_cnt {}  raw: {}", ret_ip_disp, ret_size, ret_ident, ret_seqcnt, &raw_pack_info);
+                        if verbose > 2 {
+                            println!("\tRAW: {}", &raw_pack_info);
+                        }
                     }
                 }
             }

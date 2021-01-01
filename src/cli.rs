@@ -32,6 +32,10 @@ pub struct Config {
     /// list of IPs or hostnames
     pub ips: Vec<HostInfo>,
 
+    #[structopt(short)]
+    /// write packet details if anything seems "unusual"
+    pub raw_write_odd: bool,
+
     #[structopt(short = "v", parse(from_occurrences))]
     /// verbosity - good for testing.
     /// 1 will print successes otherwise is silent.
