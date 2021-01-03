@@ -36,6 +36,8 @@ fn run() -> Result<(), anyhow::Error> {
     let cfg: Config = Config::from_args();
     init_log(cfg.log_level);
 
+    error!("starting...");
+
     let mut stop = Stop::new();
 
     let mut tracker = Tracks::new(&cfg)?;
@@ -97,8 +99,8 @@ fn _send_icmp(cfg: Config, mut tracker: Tracks, mut stop: Stop) -> Result<(), an
         .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?;
     soc4.set_ttl(255);
 
-    let soc6 = Socket::new(Domain::ipv4(), Type::raw(), Some(Protocol::icmpv4()))
-        .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?;
+    let soc6 = Socket::new(Domain::ipv6(), Type::raw(), Some(Protocol::icmpv6()))
+        .with_context(|| format!("error from Socket::new ipv6: {}:{}", file!(), line!()))?;
 
     let mut buffer = [0u8; 32];
     let mut buf = [0u8; 32];
@@ -106,27 +108,36 @@ fn _send_icmp(cfg: Config, mut tracker: Tracks, mut stop: Stop) -> Result<(), an
     let mut seq = 11000u16;
     let ident = 22000u16;
 
+    // pre compute to save time in actual loop?
+    let mut v = vec![];
+    for (n, addr) in cfg.ips.iter().enumerate() {
+        let n = n as u16;
+        v.push(UpdateSendIteration {
+            ident: ident + n,
+            ip: addr.ip,
+            sa: SockAddr::from(SocketAddr::new(addr.ip, 0)),
+            now: Instant::now(),
+        });
+    }
+
     loop {
-        for (n, addr) in cfg.ips.iter().enumerate() {
-            let n = n as u16;
-            let this_ident = ident + n;
-            if addr.ip.is_ipv4() {
-                encode(&ICMPV4_CONST, &mut buf, this_ident, seq as u16);
-                let sa: SockAddr = SockAddr::from(SocketAddr::new(addr.ip, 0));
-                trace!("sending... {:?} seq: {}", &sa, seq);
-                soc4.send_to(&buf, &sa)
+        for i in v.iter_mut() {
+            if i.ip.is_ipv4() {
+                encode(&ICMPV4_CONST, &mut buf, i.ident, seq as u16);
+                trace!("sending... {:?} seq: {}", &i.sa, seq);
+                soc4.send_to(&buf, &i.sa)
                     .with_context(|| format!("error in send_to4: {}:{}", file!(), line!()))?;
             } else {
-                encode(&ICMPV6_CONST, &mut buf, this_ident, seq as u16);
-                let sa: SockAddr = SockAddr::from(SocketAddr::new(addr.ip, 0));
-                trace!("sending... {:?} seq: {}", &sa, seq);
-                soc6.send_to(&buf, &sa)
+                encode(&ICMPV6_CONST, &mut buf, i.ident, seq as u16);
+                trace!("sending... {:?} seq: {}", &i.sa, seq);
+                soc6.send_to(&buf, &i.sa)
                     .with_context(|| format!("error in send_to6: {}:{}", file!(), line!()))?;
             }
-            let now = Instant::now();
-            tracker.update_for_send(addr.ip, now, ident, seq);
+            i.now = Instant::now();
         }
-        if stop.sleep(Duration::from_secs(2)) {
+        tracker.update_for_send_bulk(&v, seq);
+
+        if stop.sleep(cfg.interval) {
             std::process::exit(1);
         }
         //std::thread::sleep(Duration::from_secs(2));
@@ -171,16 +182,23 @@ fn _listen_icmp(proto: &ProtoTypeConsts, mut tracking: Tracks) -> Result<(), any
             Ok((size, ret_addr)) => {
                 let r = IcmpEchoReply::decode(&buffer[0..], &proto).unwrap();
                 let ip = ret_addr.as_std().unwrap().ip();
+                let ver = if ip.is_ipv4() {
+                    "V4"
+                } else if ip.is_ipv6(){
+                    "V6"
+                } else {
+                    "V?"
+                };
                 if let Some(r) = r {
                     let now = Instant::now();
                     if !tracking.update_for_recv(ip, now, r.ident, r.seq) {
-                        info!("V4 PACKET from unexpected ip: {} size: {}  raw: {:02X?}\n reply: {:?}", ip, size, &buffer[..size], &r);
+                        trace!("{} PACKET from unexpected ip: {} size: {}  raw: {:02X?}\n reply: {:?}", ver, ip, size, &buffer[..size], &r);
                     } else {
-                        trace!("V4 PACKET size: {}  raw: {:02X?}\n reply: {:?}", size, &buffer[..size], &r);
+                        trace!("{} PACKET size: {}  raw: {:02X?}\n reply: {:?}", ver, size, &buffer[..size], &r);
                     }
                 } else {
-                    warn!("bad reply code from {}", ip);
-                    trace!("V4 PACKET size: {}  raw: {:02X?}\n reply: NONE", size, &buffer[..size]);
+                    trace!("bad reply code from {}", ip);
+                    trace!("{} PACKET size: {}  raw: {:02X?}\n reply: NONE", ver, size, &buffer[..size]);
                 }
             }
         }

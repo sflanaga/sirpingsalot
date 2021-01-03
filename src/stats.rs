@@ -14,6 +14,7 @@ use crate::cli::{HostInfo, Config};
 use crate::stop::Stop;
 use std::collections::HashMap;
 use tabular::{Table, Row};
+use socket2::SockAddr;
 
 pub struct Stats {
     reply: AtomicU64,
@@ -86,10 +87,10 @@ pub fn stats_thread(mut tracker: Tracks, mut running: Stop, interval:Duration) {
 
         let table = tracker.create_stats_table();
         if stop {
-            info!("FINAL/EARLY dump of STATS:\n{}", table);
+            error!("FINAL/EARLY dump of STATS:\n{}", table);
             std::process::exit(0);
         } else {
-            println!("STATS:\n{}", table);
+            error!("STATS:\n{}", table);
         }
     }
 }
@@ -117,6 +118,13 @@ impl Clone for Tracks {
             inner: self.inner.clone()
         }
     }
+}
+
+pub struct UpdateSendIteration {
+    pub ident: u16,
+    pub ip: IpAddr,
+    pub sa: SockAddr,
+    pub now: Instant,
 }
 
 impl Tracks {
@@ -177,6 +185,22 @@ impl Tracks {
         per_host.mark = false;
         last_mark
     }
+
+    pub fn update_for_send_bulk(&mut self, v: &Vec<UpdateSendIteration>, seq: u16) {
+        let mut lock = self.inner.lock().unwrap();
+        for i in v.iter() {
+            let mut per_host = lock.map.get_mut(&i.ip).expect("hey - this ip should be there but is not");
+            if !per_host.mark && per_host.last_seq.is_some() {
+                info!("timeout for {} missed seq {}", per_host.host, per_host.last_seq.unwrap());
+                per_host.stats.update_fail();
+            }
+            per_host.last_seq = Some(seq);
+            per_host.last_time = Some(i.now);
+            per_host.mark = false;
+        }
+    }
+
+
     pub fn create_stats_table(&mut self) -> Table {
         let mut table = Table::new("\t{:<} {:>} {:>} {:>} {:>} {:>} {:>}");
         table.add_row(Row::new()
@@ -192,14 +216,14 @@ impl Tracks {
         {
             let stat_vec = self.inner.lock().unwrap()
                 .map.iter_mut()
-                .map(|(ip, v)| (ip.clone(),v.stats.zero_extract())).collect::<Vec<_>>();
-            for (ip, stat) in stat_vec.iter() {
+                .map(|(ip, v)| (ip.clone(),v.host.clone(),v.stats.zero_extract())).collect::<Vec<_>>();
+            for (ip, h, stat) in stat_vec.iter() {
                 if stat.reply > 0 || stat.non_reply > 0 {
                     let avg_ms = (stat.time_sum_us as f64 / (stat.non_reply + stat.reply) as f64) / 1000f64;
                     let min_ms = stat.time_min_us as f64 / 1000f64;
                     let max_ms = stat.time_max_us as f64 / 1000f64;
                     table.add_row(Row::new()
-                        .with_cell(&ip)
+                        .with_cell(&h)
                         .with_cell(stat.reply)
                         .with_cell(stat.non_reply)
                         .with_cell(stat.timeout)
@@ -208,7 +232,7 @@ impl Tracks {
                         .with_cell(format!("{:.3}", max_ms)));
                 } else {
                     table.add_row(Row::new()
-                        .with_cell(&ip)
+                        .with_cell(&h)
                         .with_cell(stat.reply)
                         .with_cell(stat.non_reply)
                         .with_cell(stat.timeout)
