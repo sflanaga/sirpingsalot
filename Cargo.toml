@@ -6,6 +6,10 @@ edition = "2018"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[[bin]]
+name="rawls"
+path="src/raw_listen.rs"
+
 [profile.release]
 debug = false
 lto = true
@@ -15,6 +19,8 @@ opt-level = 3
 #trustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
+log = "0.4.11"
+env_logger ="0.7.1"
 humantime = "2.0.1"
 anyhow = "1.0.36"
 rand = "0.8.0"

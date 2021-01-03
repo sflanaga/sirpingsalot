@@ -1,3 +1,4 @@
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens)]
 use anyhow::{anyhow,Context};
 use std::io::Write;
 type ResultS<T> = std::result::Result<T, anyhow::Error>;
@@ -85,6 +86,10 @@ impl<'a> EchoReply<'a> {
 }
 
 fn write_checksum(buffer: &mut [u8]) {
+    // we reset these for buffer reuse
+    buffer[2] = 0;
+    buffer[3] = 0;
+
     let mut sum = 0u32;
     for word in buffer.chunks(2) {
         let mut part = u16::from(word[0]) << 8;

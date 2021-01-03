@@ -15,11 +15,13 @@ use anyhow::private::kind::{AdhocKind, TraitKind};
 use humantime::{format_rfc3339_millis, parse_duration};
 use socket2::SockAddr;
 use structopt::StructOpt;
+use log::{debug, error, info, trace, warn};
 
 use cli::*;
 use stats::{Stats, stats_thread};
 use util::*;
 use crate::stop::Stop;
+use crate::ping::*;
 
 mod ipv4;
 mod icmp;
@@ -39,26 +41,26 @@ fn main() {
 
 fn run() -> Result<()> {
     let cfg: Config = Config::from_args();
-    if cfg.verbose > 1 {
-        println!("options: \n{:#?}", &cfg);
-    }
+    init_log(cfg.log_level);
+    debug!("options: \n{:#?}", &cfg);
     let mut stop = Stop::new();
 
-    println!("[{}]  starting....", format_rfc3339_millis(SystemTime::now()));
+    info!("[{}]  starting....", format_rfc3339_millis(SystemTime::now()));
 
     let mut threads = vec![];
     let mut tracks = vec![];
+    let mut seq_cnt_start = 4000;
     for (no, ip) in cfg.ips.iter().enumerate() {
+        seq_cnt_start += 111u16;
+
         let mut stats = Arc::new(Stats::new());
         tracks.push(stats.clone());
-        let (ip, raw_write_odd, verbose, interval, timeout, stats) = (ip.clone(), cfg.raw_write_odd, cfg.verbose, cfg.interval, cfg.timeout, stats.clone());
+        let (ip, no, raw_write_odd, interval, timeout, stats) = (ip.clone(), no, cfg.raw_write_odd, cfg.interval, cfg.timeout, stats.clone());
         threads.push(std::thread::Builder::new()
             .name(format!("ping{}", no))
-            .spawn(move || ping_thread(ip, raw_write_odd, verbose, interval, timeout, stats))?);
+            .spawn(move || ping_thread2(ip, no, raw_write_odd, interval, timeout, stats))?);
     }
-    if cfg.verbose > 1 {
-        println!("all ping threads started");
-    }
+    debug!("all ping threads started");
     let mut ip_list = vec![];
     for ip in &cfg.ips {
         let a = ip.clone();
@@ -68,14 +70,12 @@ fn run() -> Result<()> {
     if cfg.stat_interval.as_millis() > 0 {
         let interval = cfg.stat_interval;
         let mut stop = stop.clone();
-        if cfg.verbose > 1 {
-            println!("starting stats thread");
-        }
+        debug!("starting stats thread");
         let tracker_h = std::thread::Builder::new()
             .name(String::from("stats"))
             .spawn(move || stats_thread(stop, interval, ip_list, tracks))?;
     } else {
-        println!("no stats tracking started");
+        info!("no stats tracking started");
         while !stop.sleep(Duration::from_secs(60)) {
             ;
         }
@@ -87,6 +87,98 @@ fn run() -> Result<()> {
     }
     Ok(())
 }
+
+fn ping_thread2(hostinfo: HostInfo, no: usize, raw_write_odd: bool, interval: Duration, timeout: Duration, stats: Arc<Stats>) {
+    const PING_IDENT: u16 = 2112    ;
+    let mut seq_cnt = (100 + no *100) as u16;
+    debug!("starting thread for {}", &hostinfo);
+
+    let mut pinger = match Pinger::new(hostinfo.ip, timeout) {
+        Err(e) => {
+            error!("failed to setup ping for {} with error {:?}", hostinfo.ip, e);
+            std::process::exit(10);
+        },
+        Ok(v) => v,
+    };
+
+    let mut buff= String::with_capacity(128);
+    std::thread::sleep(Duration::from_millis((no * 100) as u64));
+    loop {
+        let now = Instant::now();
+        let res = pinger.ping1(PING_IDENT, seq_cnt, 255);
+        let dur = now.elapsed();
+        match res {
+            Ok((ret_size, ret_sockaddr)) => {
+                let ret_dec = pinger.decode();
+                match ret_dec {
+                    Ok((ret_type, ret_code, ret_ident, ret_seq)) => {
+                        let micros = (dur.as_nanos() / 1000) as u64;
+                        if ret_type != 0 && ret_type != 129 {
+                            stats.update_micros_non_reply(micros);
+                        } else {
+                            stats.update_micros_working(micros);
+                        }
+                        trace!("{} RAW return: {:02X?}", &hostinfo, pinger.get_recv_buffer(ret_size));
+
+                        // if raw_write_odd {
+                            if ret_ident != PING_IDENT || seq_cnt != ret_seq {
+                                buff.clear();
+                                use std::fmt::Write;
+                                writeln!(&mut buff, "response differences for {} time={}", &hostinfo, util::format_duration_mine(dur));
+                                if hostinfo.ip != ret_sockaddr.as_std().unwrap().ip() {
+                                    let ret_ip_disp = SockAddrWrap { wrap: &ret_sockaddr };
+                                    writeln!(&mut buff, "\tIpAddr sent: {}  return: {}", hostinfo.ip, ret_ip_disp);
+                                }
+                                if ret_ident != PING_IDENT {
+                                    writeln!(&mut buff, "\tident: sent: {}  return: {}", PING_IDENT, ret_ident);
+                                }
+                                if seq_cnt != ret_seq {
+                                    writeln!(&mut buff, "\tseqcnt: sent: {}  return: {}", seq_cnt, ret_seq);
+                                }
+                                info!("{}", &buff);
+                            }
+                        // }
+                        // if verbose > 0 {
+                        //     if hostinfo.ip == ret_sockaddr.as_std().unwrap().ip() {
+                        //         println!("[{}]  success for {} in {} ttl={} seq={}",
+                        //                  format_rfc3339_millis(st), &hostinfo, util::format_duration_mine(dur),
+                        //                  ret_hops, seq_cnt);
+                        //     } else {
+                        //         let ret_ip_disp = SockAddrWrap { wrap: &ret_sockaddr };
+                        //         println!("[{}]  success for {} in {} diff ret addr: {}",
+                        //                  format_rfc3339_millis(st),
+                        //                  &hostinfo, util::format_duration_mine(dur),
+                        //                  ret_ip_disp
+                        //         );
+                        //     }
+                        //     if verbose > 1 {
+                        //         let ret_ip_disp = SockAddrWrap { wrap: &ret_sockaddr };
+                        //         println!("\tret addr: {} ret size: {} ident: {} seq_cnt {}  raw: {}", ret_ip_disp, ret_size, ret_ident, ret_seqcnt, &raw_pack_info);
+                        //         if verbose > 2 {
+                        //             println!("\tRAW: {}", &raw_pack_info);
+                        //         }
+                        //     }
+                        // }
+                        info!("success for {} in {:?}", hostinfo, dur);
+                    },
+                    Err(e) => println!("error decoding return packet from {}, {}", hostinfo, e),
+                }
+            },
+            Err(e)=> {
+                stats.update_fail();
+
+                warn!("error for {} after {:?}, {}", hostinfo, dur, e);
+                e.chain().skip(1).for_each(|cause| warn!("\t cause: {}", cause));
+
+            }
+        }
+        std::thread::sleep(interval);
+        seq_cnt = seq_cnt.wrapping_add(1);
+
+    }
+
+}
+
 
 fn ping_thread(hostinfo: HostInfo, raw_write_odd: bool, verbose: usize, interval: Duration, timeout: Duration, stats: Arc<Stats>) {
     const PING_IDENT: u16 = 2112;

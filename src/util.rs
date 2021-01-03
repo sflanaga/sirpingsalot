@@ -1,9 +1,13 @@
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens)]
+
 use std::time::{Duration, SystemTime};
 use std::fmt;
 use socket2::SockAddr;
 use std::fmt::{Display, Formatter};
 use std::net::IpAddr;
 use crate::stop::Stop;
+use log::LevelFilter;
+use humantime::format_rfc3339_millis;
 
 pub fn sleep_until_next_interval_on(stop: &mut Stop, interval: Duration) -> bool {
     let now = SystemTime::now();
@@ -68,5 +72,30 @@ impl Display for SockAddrWrap<'_> {
             write!(f, "{:?}", &self.wrap)
         }
     }
+}
+
+pub fn init_log(level: LevelFilter) {
+    let mut builder = env_logger::Builder::new();
+
+    use env_logger::fmt::Formatter;
+    use std::io::Write;
+
+    // builder.format(|buf, record| {
+    //     writeln!(buf, "{} [{:4}] [{}:{}] {:>5}: {} ", format_rfc3339_millis(SystemTime::now()),
+    //              std::thread::current().name().or(Some("unknown")).unwrap(),
+    //              record.file().unwrap(),
+    //              record.line().unwrap(),
+    //              record.level(),
+    //              record.args())
+    // });
+    builder.format(|buf, record| {
+        writeln!(buf, "{} [{:4}] {} ", format_rfc3339_millis(SystemTime::now()),
+                 std::thread::current().name().or(Some("unknown")).unwrap(),
+                 record.args())
+    });
+    builder.filter_level(level);
+    builder.init();
+
+
 }
 

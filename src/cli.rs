@@ -5,6 +5,7 @@ use humantime::parse_duration;
 use std::str::FromStr;
 use anyhow::{anyhow,Context};
 use std::fmt;
+use log::LevelFilter;
 
 type ResultS<T> = std::result::Result<T, anyhow::Error>;
 
@@ -36,13 +37,17 @@ pub struct Config {
     /// write packet details if anything seems "unusual"
     pub raw_write_odd: bool,
 
-    #[structopt(short = "v", parse(from_occurrences))]
-    /// verbosity - good for testing.
-    /// 1 will print successes otherwise is silent.
-    pub verbose: usize,
+    #[structopt(short="L", long, parse(try_from_str = to_log_level), default_value("info"))]
+    /// log level
+    pub log_level: LevelFilter,
+
+    #[structopt(short="I", long, default_value("11000"))]
+    /// log level
+    pub ident_base: u16,
+
 }
 
-fn to_addr(s: &str) -> ResultS<HostInfo> {
+pub fn to_addr(s: &str) -> ResultS<HostInfo> {
     match s.to_socket_addrs() {
         Ok(mut ip) => {
             if let Some(x) = ip.next() {
@@ -94,5 +99,17 @@ impl fmt::Display for HostInfo {
         } else {
             write!(f, "{}({})", self.host.as_ref().unwrap(), self.ip)
         }
+    }
+}
+
+pub fn to_log_level(s: &str) -> anyhow::Result<LevelFilter, anyhow::Error> {
+    match s {
+        "off" | "o" => Ok(LevelFilter::Off),
+        "error" | "e"  => Ok(LevelFilter::Error),
+        "warn" | "w" => Ok(LevelFilter::Warn),
+        "info" | "i" => Ok(LevelFilter::Info),
+        "debug" | "d" => Ok(LevelFilter::Debug),
+        "trace" | "t" => Ok(LevelFilter::Trace),
+        _ => Err(anyhow::anyhow!("Error for log level: must be one of off, o, error, e, warn, w, info, i, debug, d, trace, t but got {}", &s))
     }
 }

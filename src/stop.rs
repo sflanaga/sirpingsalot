@@ -1,12 +1,22 @@
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens)]
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use std::sync::{Condvar, Arc, Mutex};
 
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Stop {
     stop: Arc<Mutex<bool>>,
     cond: Arc<Condvar>
+}
+
+impl Clone for Stop {
+    fn clone(&self) -> Self {
+        Stop{
+            stop: self.stop.clone(),
+            cond: self.cond.clone(),
+        }
+    }
 }
 
 impl Stop {
