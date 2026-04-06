@@ -2,7 +2,8 @@
 name = "sirpingsalot"
 version = "0.1.0"
 authors = ["Steve <stevemflanagan@gmail.com>"]
-edition = "2018"
+edition = "2024"
+rust-version = "1.85"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -19,12 +20,12 @@ opt-level = 3
 #trustflags = ["-C", "target-cpu=native"]
 
 [dependencies]
-log = "0.4.11"
-env_logger ="0.7.1"
-humantime = "2.0.1"
-anyhow = "1.0.36"
-rand = "0.8.0"
-socket2 = "0.3.19"
-structopt = "0.3.21"
-tabular = "0.1.4"
-ctrlc = { version="3.1.7", features=["termination"] }
+log = "0.4"
+env_logger = "0.11"
+humantime = "2"
+anyhow = "1"
+rand = "0.9"
+socket2 = { version = "0.5", features = ["all"] }
+clap = { version = "4", features = ["derive"] }
+tabular = "0.2"
+ctrlc = { version = "3", features = ["termination"] }

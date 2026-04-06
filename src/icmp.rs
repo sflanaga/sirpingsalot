@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, unused_mut, unused_parens)]
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens, dead_code)]
 use anyhow::{anyhow,Context};
 use std::io::Write;
 type ResultS<T> = std::result::Result<T, anyhow::Error>;
@@ -70,7 +70,7 @@ impl<'a> EchoReply<'a> {
 
         let type_ = buffer[0];
         let code = buffer[1];
-        if type_ != P::ECHO_REPLY_TYPE && code != P::ECHO_REPLY_CODE {
+        if type_ != P::ECHO_REPLY_TYPE || code != P::ECHO_REPLY_CODE {
             return Err(anyhow!("invalid packet"))
         }
 

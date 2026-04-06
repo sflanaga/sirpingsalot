@@ -1,10 +1,10 @@
-#![allow(unused_imports, unused_variables, unused_mut, unused_parens, unreachable_code)]
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens, unreachable_code, dead_code)]
 
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use anyhow::{Context, anyhow};
 use std::time::{Duration, SystemTime, Instant};
 use humantime::format_rfc3339_millis;
-use structopt::StructOpt;
+use clap::Parser;
 use log::{debug, error, info, trace, warn};
 
 mod cli;
@@ -23,6 +23,7 @@ use util::*;
 use crate::stop::Stop;
 use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
+use std::mem::MaybeUninit;
 
 fn main() {
     match run() {
@@ -33,7 +34,7 @@ fn main() {
 
 
 fn run() -> Result<(), anyhow::Error> {
-    let cfg: Config = Config::from_args();
+    let cfg: Config = Config::parse();
     init_log(cfg.log_level);
 
     error!("starting...");
@@ -82,7 +83,7 @@ fn run() -> Result<(), anyhow::Error> {
         std::process::exit(0);
     }
 
-    recv4.join();
+    let _ = recv4.join();
 
     Ok(())
 }
@@ -95,11 +96,11 @@ fn send_icmp(cfg: Config, mut tracker: Tracks, mut stop: Stop) {
 }
 
 fn _send_icmp(cfg: Config, mut tracker: Tracks, mut stop: Stop) -> Result<(), anyhow::Error> {
-    let soc4 = Socket::new(Domain::ipv4(), Type::raw(), Some(Protocol::icmpv4()))
+    let soc4 = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
         .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?;
-    soc4.set_ttl(255);
+    let _ = soc4.set_ttl(255);
 
-    let soc6 = Socket::new(Domain::ipv6(), Type::raw(), Some(Protocol::icmpv6()))
+    let soc6 = Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
         .with_context(|| format!("error from Socket::new ipv6: {}:{}", file!(), line!()))?;
 
     let mut buffer = [0u8; 32];
@@ -123,12 +124,12 @@ fn _send_icmp(cfg: Config, mut tracker: Tracks, mut stop: Stop) -> Result<(), an
     loop {
         for i in v.iter_mut() {
             if i.ip.is_ipv4() {
-                encode(&ICMPV4_CONST, &mut buf, i.ident, seq as u16);
+                let _ = encode(&ICMPV4_CONST, &mut buf, i.ident, seq as u16);
                 trace!("sending... {:?} seq: {}", &i.sa, seq);
                 soc4.send_to(&buf, &i.sa)
                     .with_context(|| format!("error in send_to4: {}:{}", file!(), line!()))?;
             } else {
-                encode(&ICMPV6_CONST, &mut buf, i.ident, seq as u16);
+                let _ = encode(&ICMPV6_CONST, &mut buf, i.ident, seq as u16);
                 trace!("sending... {:?} seq: {}", &i.sa, seq);
                 soc6.send_to(&buf, &i.sa)
                     .with_context(|| format!("error in send_to6: {}:{}", file!(), line!()))?;
@@ -155,23 +156,24 @@ fn listen_icmp(proto: &ProtoTypeConsts, mut tracking: Tracks) {
 }
 
 fn _listen_icmp(proto: &ProtoTypeConsts, mut tracking: Tracks) -> Result<(), anyhow::Error> {
-    let mut soc = if proto.isV4 {
-        let soc = Socket::new(Domain::ipv4(), Type::raw(), Some(Protocol::icmpv4()))
+    let mut soc = if proto.is_v4 {
+        let soc = Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
             .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?;
-        soc.set_ttl(255);
+        let _ = soc.set_ttl(255);
         soc
     } else {
-        Socket::new(Domain::ipv6(), Type::raw(), Some(Protocol::icmpv6()))
+        Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
             .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?
     };
     soc.set_read_timeout(Some(Duration::from_secs(60)))?;
 
     let mut buffer = [0u8; 1024];
+    let mut recv_buf = [MaybeUninit::<u8>::uninit(); 1024];
 
     loop {
         trace!("waiting...");
 
-        let res = soc.recv_from(&mut buffer);
+        let res = soc.recv_from(&mut recv_buf);
         match res {
             Err(e) => {
                 match e.kind() {
@@ -180,8 +182,16 @@ fn _listen_icmp(proto: &ProtoTypeConsts, mut tracking: Tracks) -> Result<(), any
                 }
             }
             Ok((size, ret_addr)) => {
+                // SAFETY: recv_from initialized size bytes
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        recv_buf.as_ptr() as *const u8,
+                        buffer.as_mut_ptr(),
+                        size,
+                    );
+                }
                 let r = IcmpEchoReply::decode(&buffer[0..], &proto).unwrap();
-                let ip = ret_addr.as_std().unwrap().ip();
+                let ip = ret_addr.as_socket().unwrap().ip();
                 let ver = if ip.is_ipv4() {
                     "V4"
                 } else if ip.is_ipv6(){
@@ -209,9 +219,8 @@ fn _listen_icmp(proto: &ProtoTypeConsts, mut tracking: Tracks) -> Result<(), any
 
 
 fn encode(proto: &ProtoTypeConsts, buff: &mut [u8], ident: u16, seq: u16) -> Result<(), anyhow::Error> {
-    pub const HEADER_SIZE: usize = 8;
-    buff[0] = proto.ECHO_REQUEST_TYPE;
-    buff[1] = proto.ECHO_REQUEST_CODE;
+    buff[0] = proto.echo_request_type;
+    buff[1] = proto.echo_request_code;
 
     buff[4] = (ident >> 8) as u8;
     buff[5] = ident as u8;
@@ -224,33 +233,30 @@ fn encode(proto: &ProtoTypeConsts, buff: &mut [u8], ident: u16, seq: u16) -> Res
 
 
 struct ProtoTypeConsts {
-    isV4: bool,
+    is_v4: bool,
     ver: &'static str,
-    ECHO_REQUEST_TYPE: u8,
-    ECHO_REQUEST_CODE: u8,
-    ECHO_REPLY_TYPE: u8,
-    ECHO_REPLY_CODE: u8,
-    HEADER_SIZE: usize,
+    echo_request_type: u8,
+    echo_request_code: u8,
+    echo_reply_type: u8,
+    echo_reply_code: u8,
 }
 
 const ICMPV4_CONST: ProtoTypeConsts = ProtoTypeConsts {
-    isV4: true,
+    is_v4: true,
     ver: "V4",
-    ECHO_REQUEST_TYPE: 8,
-    ECHO_REQUEST_CODE: 0,
-    ECHO_REPLY_TYPE: 0,
-    ECHO_REPLY_CODE: 0,
-    HEADER_SIZE: 8,
+    echo_request_type: 8,
+    echo_request_code: 0,
+    echo_reply_type: 0,
+    echo_reply_code: 0,
 };
 
 const ICMPV6_CONST: ProtoTypeConsts = ProtoTypeConsts {
-    isV4: false,
+    is_v4: false,
     ver: "V6",
-    ECHO_REQUEST_TYPE: 128,
-    ECHO_REQUEST_CODE: 0,
-    ECHO_REPLY_TYPE: 129,
-    ECHO_REPLY_CODE: 0,
-    HEADER_SIZE: 8,
+    echo_request_type: 128,
+    echo_request_code: 0,
+    echo_reply_type: 129,
+    echo_reply_code: 0,
 };
 
 fn write_checksum(buffer: &mut [u8]) {
@@ -288,7 +294,7 @@ struct IcmpEchoReply {
 impl IcmpEchoReply {
     pub fn decode(buf: &[u8], proto: &ProtoTypeConsts) -> Result<Option<Self>, anyhow::Error> {
         let mut header_size = 0usize;
-        if proto.isV4 {
+        if proto.is_v4 {
             let byte0 = buf[0];
             let version = (byte0 & 0xf0) >> 4;
             header_size = 4 * ((byte0 & 0x0f) as usize);
@@ -299,7 +305,7 @@ impl IcmpEchoReply {
 
         let type_ = icmp_data[0];
         let code = icmp_data[1];
-        if type_ != proto.ECHO_REPLY_TYPE && code != proto.ECHO_REPLY_CODE {
+        if type_ != proto.echo_reply_type || code != proto.echo_reply_code {
             return Ok(None);
         }
 

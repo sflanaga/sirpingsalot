@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, unused_mut, unused_parens)]
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens, dead_code)]
 
 use std::time::{Duration, SystemTime};
 use std::fmt;
@@ -64,9 +64,9 @@ pub struct SockAddrWrap<'a> {
 
 impl Display for SockAddrWrap<'_> {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        if let Some(ip) = self.wrap.as_inet() {
+        if let Some(ip) = self.wrap.as_socket_ipv4() {
             write!(f, "ipv4: {}", ip)
-        } else if let Some(ip) = self.wrap.as_inet6() {
+        } else if let Some(ip) = self.wrap.as_socket_ipv6() {
             write!(f, "ipv6: {}", ip)
         } else {
             write!(f, "{:?}", &self.wrap)
@@ -89,8 +89,9 @@ pub fn init_log(level: LevelFilter) {
     //              record.args())
     // });
     builder.format(|buf, record| {
-        writeln!(buf, "{} [{:4}] {} ", format_rfc3339_millis(SystemTime::now()),
+        writeln!(buf, "{} [{:4}] {:>5} {} ", format_rfc3339_millis(SystemTime::now()),
                  std::thread::current().name().or(Some("unknown")).unwrap(),
+                 record.level(),
                  record.args())
     });
     builder.filter_level(level);

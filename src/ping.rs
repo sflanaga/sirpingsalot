@@ -1,48 +1,45 @@
 use std::net::{IpAddr, SocketAddr};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
-use rand::random;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use log::{debug, error, info, trace, warn};
+use log::trace;
 
-use crate::icmp::{EchoReply, EchoRequest, HEADER_SIZE as ICMP_HEADER_SIZE, IcmpV4, IcmpV6};
-use crate::ipv4::IpV4Packet;
 use std::io::Write;
+use std::mem::MaybeUninit;
 
+const ICMP_HEADER_SIZE: usize = 8;
 const TOKEN_SIZE: usize = 0;
 const ECHO_REQUEST_BUFFER_SIZE: usize = ICMP_HEADER_SIZE + TOKEN_SIZE;
 
 type Token = [u8; TOKEN_SIZE];
 
 struct ProtoTypeConsts {
-    ECHO_REQUEST_TYPE: u8,
-    ECHO_REQUEST_CODE: u8,
-    ECHO_REPLY_TYPE: u8,
-    ECHO_REPLY_CODE: u8,
-    HEADER_SIZE: usize,
+    echo_request_type: u8,
+    echo_request_code: u8,
+    echo_reply_type: u8,
+    echo_reply_code: u8,
 }
 
 const ICMPV4_CONST: ProtoTypeConsts = ProtoTypeConsts {
-    ECHO_REQUEST_TYPE: 8,
-    ECHO_REQUEST_CODE: 0,
-    ECHO_REPLY_TYPE: 0,
-    ECHO_REPLY_CODE: 0,
-    HEADER_SIZE: 8,
+    echo_request_type: 8,
+    echo_request_code: 0,
+    echo_reply_type: 0,
+    echo_reply_code: 0,
 };
 
 const ICMPV6_CONST: ProtoTypeConsts = ProtoTypeConsts {
-    ECHO_REQUEST_TYPE: 128,
-    ECHO_REQUEST_CODE: 0,
-    ECHO_REPLY_TYPE: 129,
-    ECHO_REPLY_CODE: 0,
-    HEADER_SIZE: 8,
+    echo_request_type: 128,
+    echo_request_code: 0,
+    echo_reply_type: 129,
+    echo_reply_code: 0,
 };
 
 
 pub struct Pinger {
     dest: SocketAddr,
+    label: String,
     timeout: Duration,
     token: Token,
     socket: Socket,
@@ -53,30 +50,26 @@ pub struct Pinger {
 
 impl Pinger {
 
-    pub fn get_send_buffer(&self, size: usize) -> &[u8] {
-        &self.send_buffer[..size]
-    }
-
     pub fn get_recv_buffer(&self, size: usize) -> &[u8] {
         &self.recv_buffer[..size]
     }
 
-    pub fn new(addr: IpAddr, timeout: Duration) -> Result<Pinger> {
+    pub fn new(addr: IpAddr, timeout: Duration, label: String) -> Result<Pinger> {
         let dest = SocketAddr::new(addr, 0);
-        let default_payload: &Token = &random();
 
         let (socket, proto) = if dest.is_ipv4() {
-            (Socket::new(Domain::ipv4(), Type::raw(), Some(Protocol::icmpv4()))
+            (Socket::new(Domain::IPV4, Type::RAW, Some(Protocol::ICMPV4))
                  .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?,
              ICMPV4_CONST)
         } else {
-            (Socket::new(Domain::ipv6(), Type::raw(), Some(Protocol::icmpv6()))
+            (Socket::new(Domain::IPV6, Type::RAW, Some(Protocol::ICMPV6))
                  .with_context(|| format!("error from Socket::new ipv6: {}:{}", file!(), line!()))?,
              ICMPV6_CONST)
         };
 
         Ok(Pinger {
             dest,
+            label,
             timeout,
             token: [0u8; TOKEN_SIZE],
             socket: socket,
@@ -87,15 +80,14 @@ impl Pinger {
     }
 
     fn encode(&mut self, ident: u16, seq: u16) -> Result<()> {
-        pub const HEADER_SIZE: usize = 8;
-        self.send_buffer[0] = self.proto.ECHO_REQUEST_TYPE;
-        self.send_buffer[1] = self.proto.ECHO_REQUEST_CODE;
+        self.send_buffer[0] = self.proto.echo_request_type;
+        self.send_buffer[1] = self.proto.echo_request_code;
 
         self.send_buffer[4] = (ident >> 8) as u8;
         self.send_buffer[5] = ident as u8;
         self.send_buffer[6] = (seq >> 8) as u8;
         self.send_buffer[7] = seq as u8;
-        if let Err(_) = (&mut self.send_buffer[HEADER_SIZE..]).write(&self.token[..]) {
+        if let Err(_) = (&mut self.send_buffer[ICMP_HEADER_SIZE..]).write(&self.token[..]) {
             return Err(anyhow!("invalid packet size"));
         }
 
@@ -104,7 +96,7 @@ impl Pinger {
     }
 
     pub fn ping1(&mut self, ident: u16, seq: u16, ttl: u32) -> anyhow::Result<(usize, SockAddr), anyhow::Error> {
-        self.encode(ident, seq);
+        self.encode(ident, seq)?;
 
         if self.dest.is_ipv4() {
             self.socket.set_ttl(ttl)
@@ -114,18 +106,48 @@ impl Pinger {
             //println!("not setting TTL for IPv6 as it currently fails for some reason");
         }
 
-        trace!("{} sending buff: {:02X?}", self.dest.ip(), &self.send_buffer);
+        trace!("{} sending buff: {:02X?}", self.label, &self.send_buffer);
         self.socket.send_to(&self.send_buffer, &self.dest.into())
             .with_context(|| format!("error from send_to: {}:{}", file!(), line!()))?;
 
-        self.socket.set_read_timeout(Some(self.timeout))
-            .with_context(|| format!("error from set_read_timeout: {}:{}", file!(), line!()))?;
+        let deadline = Instant::now() + self.timeout;
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(anyhow!("timeout waiting for echo reply from {}", self.label));
+            }
 
-        let (ret_size, ret_sockaddr) = self.socket.recv_from(&mut self.recv_buffer[0..])
-            .with_context(|| format!("error from recv_from: {}:{}", file!(), line!()))?;
+            self.socket.set_read_timeout(Some(remaining))
+                .with_context(|| format!("error from set_read_timeout: {}:{}", file!(), line!()))?;
 
-        self.decode();
-        Ok((ret_size, ret_sockaddr))
+            let mut recv_buf = [MaybeUninit::<u8>::uninit(); 1024];
+            let (ret_size, ret_sockaddr) = self.socket.recv_from(&mut recv_buf)
+                .with_context(|| format!("error from recv_from: {}:{}", file!(), line!()))?;
+            // SAFETY: recv_from initialized ret_size bytes
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    recv_buf.as_ptr() as *const u8,
+                    self.recv_buffer.as_mut_ptr(),
+                    ret_size,
+                );
+            }
+
+            // Decode and check if this reply matches our ident — if not, discard and keep waiting
+            match self.decode() {
+                Ok((_type, _code, ret_ident, _seq)) if ret_ident == ident => {
+                    trace!("{} ident sent: {} returned: {} seq sent: {} returned: {}", self.label, ident, ret_ident, seq, _seq);
+                    return Ok((ret_size, ret_sockaddr));
+                }
+                Ok((_type, _code, ret_ident, _seq)) => {
+                    trace!("{} discarding reply with ident {} (expected {})", self.label, ret_ident, ident);
+                    continue;
+                }
+                Err(_) => {
+                    trace!("{} discarding non-echo-reply packet", self.label);
+                    continue;
+                }
+            }
+        }
     }
 
     pub fn decode(&mut self) -> Result<(u8,u8,u16,u16)> {
@@ -142,7 +164,7 @@ impl Pinger {
 
         let ret_type_ = icmp_data[0];
         let ret_code = icmp_data[1];
-        if ret_type_ != self.proto.ECHO_REPLY_TYPE && ret_code != self.proto.ECHO_REPLY_CODE {
+        if ret_type_ != self.proto.echo_reply_type || ret_code != self.proto.echo_reply_code {
             return Err(anyhow!("invalid packet"));
         }
 
@@ -178,85 +200,4 @@ impl Pinger {
         trace!("after checksum: {:02X?}", self.send_buffer);
 
     }
-}
-
-pub fn ping(addr: IpAddr, timeout: Option<Duration>, ttl: Option<u32>,
-            ident: Option<u16>, seq_cnt: Option<u16>, payload: Option<&Token>, verbose: usize,
-            msg_buf: &mut String, record_raw_bits: bool)
-            -> Result<(usize, SockAddr, u8, u8, u16, u16, u8), anyhow::Error> {
-    let timeout = match timeout {
-        Some(timeout) => Some(timeout),
-        None => Some(Duration::from_secs(4)),
-    };
-
-    let dest = SocketAddr::new(addr, 0);
-    let mut buffer = [0; ECHO_REQUEST_BUFFER_SIZE];
-
-    let default_payload: &Token = &random();
-
-    let request = EchoRequest {
-        ident: ident.unwrap_or(random()),
-        seq_cnt: seq_cnt.unwrap_or(1),
-        payload: payload.unwrap_or(default_payload),
-    };
-
-
-    let socket = if dest.is_ipv4() {
-        if verbose > 2 { println!("built echo request - now encoding ipv4 {},{}", file!(), line!()); }
-        if let Err(e) = request.encode::<IcmpV4>(&mut buffer[..]) {
-            return Err(anyhow!("error during encoding ipv4 packet: error {}", e));
-        }
-        Socket::new(Domain::ipv4(), Type::raw(), Some(Protocol::icmpv4()))
-            .with_context(|| format!("error from Socket::new ipv4: {}:{}", file!(), line!()))?
-    } else {
-        if verbose > 2 { println!("built echo request - now encoding ipv6 {},{}", file!(), line!()); }
-        if let Err(e) = request.encode::<IcmpV6>(&mut buffer[..]) {
-            return Err(anyhow!("error during encoding ipv6 packet: error {}", e));
-        }
-        Socket::new(Domain::ipv6(), Type::raw(), Some(Protocol::icmpv6()))
-            .with_context(|| format!("error from Socket::new ipv6: {}:{}", file!(), line!()))?
-    };
-    if dest.is_ipv4() {
-        if verbose > 2 { println!("encoded - now set ttl {},{}", file!(), line!()); }
-        socket.set_ttl(ttl.unwrap_or(64))
-            .with_context(|| format!("error from set_ttl: {}:{}", file!(), line!()))?;
-    } else {
-        // TODO: why?
-        //println!("not setting TTL for IPv6 as it currently fails for some reason");
-    }
-
-    if verbose > 2 { println!("set ttl worked - now sending {},{}", file!(), line!()); }
-    socket.send_to(&mut buffer, &dest.into())
-        .with_context(|| format!("error from send_to: {}:{}", file!(), line!()))?;
-
-    if verbose > 2 { println!("sent - now waiting {},{}", file!(), line!()); }
-    socket.set_read_timeout(timeout)
-        .with_context(|| format!("error from set_read_timeout: {}:{}", file!(), line!()))?;
-
-    if verbose > 2 { println!("wait done - now getting response {},{}", file!(), line!()); }
-    let mut buffer: [u8; 2048] = [0; 2048];
-    let (size, sockaddr) = socket.recv_from(&mut buffer)
-        .with_context(|| format!("error from recv_from: {}:{}", file!(), line!()))?;
-
-    // if record_raw_bits {
-    //     msg_buf.clear();
-    //     write!(msg_buf, "ip: {} pkt size: {} raw data: {:02X?}", addr, size, &buffer[0..size]);
-    // }
-    //
-    let reply = if dest.is_ipv4() {
-        if verbose > 2 { println!("response received - now decoding ipv4 {},{}", file!(), line!()); }
-        let ipv4_packet = IpV4Packet::decode(&buffer)?;
-        let reply = EchoReply::decode::<IcmpV4>(ipv4_packet.data)
-            .with_context(|| format!("error from EchoReply::decode ipv4: {}:{}", file!(), line!()))?;
-        return Ok((size, sockaddr, reply.type_, reply.code, reply.ident, reply.seq_cnt, ipv4_packet.ttl));
-        // {
-        //     Ok(reply) => reply,
-        //     Err(_) => return Err(ErrorKind::InternalError.into()),
-        // }
-    } else {
-        if verbose > 2 { println!("response received - now decoding ipv6 {},{}", file!(), line!()); }
-        let reply = EchoReply::decode::<IcmpV6>(&buffer)
-            .with_context(|| format!("error from EchoReply::decode ipv4: {}:{}", file!(), line!()))?;
-        return Ok((size, sockaddr, reply.type_, reply.code, reply.ident, reply.seq_cnt, 0));
-    };
 }

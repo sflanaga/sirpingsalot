@@ -2,6 +2,7 @@
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use std::sync::{Condvar, Arc, Mutex};
+use log::info;
 
 
 #[derive(Debug)]
@@ -27,7 +28,7 @@ impl Stop {
         };
         let mut ctrl_n = n.clone();
         ctrlc::set_handler(move || {
-            println!("told to stop via \"ctrl-c\"");
+            info!("told to stop via ctrl-c");
             ctrl_n.signal();
         }).expect("Error setting Ctrl-C handler");
         n

@@ -1,47 +1,42 @@
-use structopt::StructOpt;
+use clap::Parser;
 use std::time::Duration;
 use std::net::{IpAddr, ToSocketAddrs};
 use humantime::parse_duration;
 use std::str::FromStr;
 use anyhow::{anyhow,Context};
 use std::fmt;
-use log::LevelFilter;
+use log::{debug, LevelFilter};
 
 type ResultS<T> = std::result::Result<T, anyhow::Error>;
 
-#[derive(StructOpt, Debug, Clone)]
-#[structopt(
-global_settings(& [
-structopt::clap::AppSettings::ColoredHelp,
-structopt::clap::AppSettings::UnifiedHelpMessage
-]),
-)]
+#[derive(Parser, Debug, Clone)]
+#[allow(dead_code)]
 pub struct Config {
-    #[structopt(short, parse(try_from_str = parse_duration), default_value("1s"))]
+    #[arg(short, value_parser = parse_duration, default_value = "1s")]
     /// time thread sleeps between pings
     pub interval: Duration,
 
-    #[structopt(short, parse(try_from_str = parse_duration), default_value("5s"))]
+    #[arg(short, value_parser = parse_duration, default_value = "5s")]
     /// time-out of the ping
     pub timeout: Duration,
 
-    #[structopt(short, parse(try_from_str = parse_duration), default_value("0s"))]
+    #[arg(short, value_parser = parse_duration, default_value = "0s")]
     /// interval that statistcs are printed out - 0 means do not print out
     pub stat_interval: Duration,
 
-    #[structopt(parse(try_from_str = to_addr))]
+    #[arg(value_parser = to_addr)]
     /// list of IPs or hostnames
     pub ips: Vec<HostInfo>,
 
-    #[structopt(short)]
+    #[arg(short)]
     /// write packet details if anything seems "unusual"
     pub raw_write_odd: bool,
 
-    #[structopt(short="L", long, parse(try_from_str = to_log_level), default_value("info"))]
+    #[arg(short = 'L', long, value_parser = to_log_level, default_value = "info")]
     /// log level
     pub log_level: LevelFilter,
 
-    #[structopt(short="I", long, default_value("11000"))]
+    #[arg(short = 'I', long, default_value = "11000")]
     /// log level
     pub ident_base: u16,
 
@@ -51,21 +46,21 @@ pub fn to_addr(s: &str) -> ResultS<HostInfo> {
     match s.to_socket_addrs() {
         Ok(mut ip) => {
             if let Some(x) = ip.next() {
-                println!("to addr ip: {}", x.ip());
+                debug!("to addr ip: {}", x.ip());
                 Ok(HostInfo::new(None,x.ip()))
             } else {
                 Err(anyhow!("error in look or address interpretation for \"{}\"", s))
             }
         }
-        Err(e) => {
+        Err(_e) => {
             match IpAddr::from_str(s) {
                 Ok(ip) => {
                     Ok(HostInfo::new(None,ip))
                 }
-                Err(e) => {
+                Err(_e) => {
                     let mut snew: String = String::from(s);
                     snew.push_str(":0");
-                    let mut x = snew
+                    let x = snew
                         .to_socket_addrs()
                         .with_context(|| format!("unknown host or IP for \"{}\" using faked port 22", s))?
                         .next().expect("no IP address found for host").ip();

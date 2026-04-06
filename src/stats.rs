@@ -1,4 +1,4 @@
-#![allow(unused_imports, unused_variables, unused_mut, unused_parens)]
+#![allow(unused_imports, unused_variables, unused_mut, unused_parens, dead_code)]
 use humantime::format_rfc3339_millis;
 use std::sync::atomic::{AtomicU64, Ordering, AtomicBool};
 use std::time::{Duration, SystemTime, Instant};
@@ -41,7 +41,7 @@ impl Stats {
             timeout: AtomicU64::new(0),
             non_reply: AtomicU64::new(0),
             time_sum_us: AtomicU64::new(0),
-            time_min_us: AtomicU64::new(std::u64::MAX),
+            time_min_us: AtomicU64::new(u64::MAX),
             time_max_us: AtomicU64::new(0),
         }
     }
@@ -52,7 +52,7 @@ impl Stats {
             non_reply:self.non_reply.swap(0, Ordering::Relaxed),
             timeout:self.timeout.swap(0, Ordering::Relaxed),
             time_sum_us:self.time_sum_us.swap(0, Ordering::Relaxed),
-            time_min_us:self.time_min_us.swap(std::u64::MAX, Ordering::Relaxed),
+            time_min_us:self.time_min_us.swap(u64::MAX, Ordering::Relaxed),
             time_max_us:self.time_max_us.swap(0, Ordering::Relaxed),
         }
     }
@@ -78,7 +78,6 @@ impl Stats {
 
 impl Stats {
 }
-
 
 pub fn stats_thread(mut tracker: Tracks, mut running: Stop, interval:Duration) {
     use tabular::{Table, Row};

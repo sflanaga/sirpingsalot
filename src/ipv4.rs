@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use anyhow::{anyhow,Context};
 const MINIMUM_PACKET_SIZE: usize = 20;
 
