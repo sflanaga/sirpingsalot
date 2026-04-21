@@ -21,6 +21,7 @@ pub struct Stats {
     non_reply: AtomicU64,
     timeout: AtomicU64,
     time_sum_us: AtomicU64,
+    time_sum_sq_us: AtomicU64,
     time_min_us: AtomicU64,
     time_max_us: AtomicU64,
 }
@@ -30,6 +31,7 @@ pub struct StatsSnapShot {
     non_reply: u64,
     timeout: u64,
     time_sum_us: u64,
+    time_sum_sq_us: u64,
     time_min_us: u64,
     time_max_us: u64,
 }
@@ -41,6 +43,7 @@ impl Stats {
             timeout: AtomicU64::new(0),
             non_reply: AtomicU64::new(0),
             time_sum_us: AtomicU64::new(0),
+            time_sum_sq_us: AtomicU64::new(0),
             time_min_us: AtomicU64::new(u64::MAX),
             time_max_us: AtomicU64::new(0),
         }
@@ -48,18 +51,20 @@ impl Stats {
 
     pub fn zero_extract(&mut self) -> StatsSnapShot {
         StatsSnapShot {
-            reply:self.reply.swap(0, Ordering::Relaxed),
-            non_reply:self.non_reply.swap(0, Ordering::Relaxed),
-            timeout:self.timeout.swap(0, Ordering::Relaxed),
-            time_sum_us:self.time_sum_us.swap(0, Ordering::Relaxed),
-            time_min_us:self.time_min_us.swap(u64::MAX, Ordering::Relaxed),
-            time_max_us:self.time_max_us.swap(0, Ordering::Relaxed),
+            reply: self.reply.swap(0, Ordering::Relaxed),
+            non_reply: self.non_reply.swap(0, Ordering::Relaxed),
+            timeout: self.timeout.swap(0, Ordering::Relaxed),
+            time_sum_us: self.time_sum_us.swap(0, Ordering::Relaxed),
+            time_sum_sq_us: self.time_sum_sq_us.swap(0, Ordering::Relaxed),
+            time_min_us: self.time_min_us.swap(u64::MAX, Ordering::Relaxed),
+            time_max_us: self.time_max_us.swap(0, Ordering::Relaxed),
         }
     }
 
     pub fn update_micros_working(&self, micros: u64) {
         self.reply.fetch_add(1, Ordering::Relaxed);
         self.time_sum_us.fetch_add(micros, Ordering::Relaxed);
+        self.time_sum_sq_us.fetch_add(micros.saturating_mul(micros), Ordering::Relaxed);
         self.time_min_us.fetch_min(micros, Ordering::Relaxed);
         self.time_max_us.fetch_max(micros, Ordering::Relaxed);
     }
@@ -67,6 +72,7 @@ impl Stats {
     pub fn update_micros_non_reply(&self, micros: u64) {
         self.non_reply.fetch_add(1, Ordering::Relaxed);
         self.time_sum_us.fetch_add(micros, Ordering::Relaxed);
+        self.time_sum_sq_us.fetch_add(micros.saturating_mul(micros), Ordering::Relaxed);
         self.time_min_us.fetch_min(micros, Ordering::Relaxed);
         self.time_max_us.fetch_max(micros, Ordering::Relaxed);
     }
@@ -201,7 +207,7 @@ impl Tracks {
 
 
     pub fn create_stats_table(&mut self) -> Table {
-        let mut table = Table::new("\t{:<} {:>} {:>} {:>} {:>} {:>} {:>}");
+        let mut table = Table::new("\t{:<} {:>} {:>} {:>} {:>} {:>} {:>} {:>}");
         table.add_row(Row::new()
             .with_cell("host")
             .with_cell("reply")
@@ -210,17 +216,27 @@ impl Tracks {
             .with_cell("avg(ms)")
             .with_cell("min(ms)")
             .with_cell("max(ms)")
+            .with_cell("stdev(ms)")
         );
-        let st = SystemTime::now();
+        let _st = SystemTime::now();
         {
             let stat_vec = self.inner.lock().unwrap()
                 .map.iter_mut()
-                .map(|(ip, v)| (ip.clone(),v.host.clone(),v.stats.zero_extract())).collect::<Vec<_>>();
-            for (ip, h, stat) in stat_vec.iter() {
-                if stat.reply > 0 || stat.non_reply > 0 {
-                    let avg_ms = (stat.time_sum_us as f64 / (stat.non_reply + stat.reply) as f64) / 1000f64;
-                    let min_ms = stat.time_min_us as f64 / 1000f64;
-                    let max_ms = stat.time_max_us as f64 / 1000f64;
+                .map(|(ip, v)| (ip.clone(), v.host.clone(), v.stats.zero_extract())).collect::<Vec<_>>();
+            for (_ip, h, stat) in stat_vec.iter() {
+                let count = stat.reply + stat.non_reply;
+                if count > 0 {
+                    let avg_ms = (stat.time_sum_us as f64 / count as f64) / 1000.0;
+                    let min_ms = stat.time_min_us as f64 / 1000.0;
+                    let max_ms = stat.time_max_us as f64 / 1000.0;
+                    let stdev_ms = if count >= 2 {
+                        let avg_us = stat.time_sum_us as f64 / count as f64;
+                        let mean_sq = stat.time_sum_sq_us as f64 / count as f64;
+                        let var = (mean_sq - avg_us * avg_us).max(0.0);
+                        format!("{:.3}", var.sqrt() / 1000.0)
+                    } else {
+                        "NA".to_string()
+                    };
                     table.add_row(Row::new()
                         .with_cell(&h)
                         .with_cell(stat.reply)
@@ -228,13 +244,15 @@ impl Tracks {
                         .with_cell(stat.timeout)
                         .with_cell(format!("{:.3}", avg_ms))
                         .with_cell(format!("{:.3}", min_ms))
-                        .with_cell(format!("{:.3}", max_ms)));
+                        .with_cell(format!("{:.3}", max_ms))
+                        .with_cell(stdev_ms));
                 } else {
                     table.add_row(Row::new()
                         .with_cell(&h)
                         .with_cell(stat.reply)
                         .with_cell(stat.non_reply)
                         .with_cell(stat.timeout)
+                        .with_cell("NA")
                         .with_cell("NA")
                         .with_cell("NA")
                         .with_cell("NA")

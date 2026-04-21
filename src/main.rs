@@ -33,31 +33,48 @@ fn run() -> Result<()> {
     debug!("options: \n{:#?}", &cfg);
     let stop = Stop::new();
 
-    info!("[{}]  starting....", format_rfc3339_millis(SystemTime::now()));
+    // Compute or validate stat_interval.
+    // 0 (the default) means auto-select the smallest value from the sequence
+    // [60s, 300s, 900s, 1h, 4h, 24h] that exceeds the ping interval.
+    // An explicitly provided value must be greater than the ping interval.
+    let stat_interval = if cfg.stat_interval.as_millis() == 0 {
+        const DEFAULTS: &[u64] = &[60, 300, 900, 3_600, 14_400, 86_400];
+        DEFAULTS.iter()
+            .map(|&s| Duration::from_secs(s))
+            .find(|&d| d > cfg.interval)
+            .unwrap_or(Duration::from_secs(86_400))
+    } else {
+        if cfg.stat_interval <= cfg.interval {
+            return Err(anyhow::anyhow!(
+                "stat interval (-s {:?}) must be greater than ping interval (-i {:?})",
+                cfg.stat_interval, cfg.interval
+            ));
+        }
+        cfg.stat_interval
+    };
+
+    info!("[{}]  starting.... (ping interval: {:?}, stat interval: {:?})",
+        format_rfc3339_millis(SystemTime::now()), cfg.interval, stat_interval);
+
+    let tracker = Tracks::new(&cfg)?;
 
     let mut threads = vec![];
     for (no, ip) in cfg.ips.iter().enumerate() {
         let ip: HostInfo = ip.clone();
         let (interval, timeout) = (cfg.interval, cfg.timeout);
+        let tracker = tracker.clone();
         threads.push(std::thread::Builder::new()
             .name(format!("ping{}", no))
-            .spawn(move || ping_thread(ip, no, interval, timeout))?);
+            .spawn(move || ping_thread(ip, no, interval, timeout, tracker))?);
     }
     debug!("all ping threads started");
 
-    if cfg.stat_interval.as_millis() > 0 {
-        let interval = cfg.stat_interval;
+    {
         let stop = stop.clone();
-        let tracker = Tracks::new(&cfg)?;
-        debug!("starting stats thread");
+        debug!("starting stats thread with interval {:?}", stat_interval);
         let _tracker_h = std::thread::Builder::new()
             .name(String::from("stats"))
-            .spawn(move || stats::stats_thread(tracker, stop, interval))?;
-    } else {
-        info!("no stats tracking started");
-        while !stop.sleep(Duration::from_secs(60)) {
-        }
-        std::process::exit(0);
+            .spawn(move || stats::stats_thread(tracker, stop, stat_interval))?;
     }
 
     for h in threads {
@@ -66,7 +83,7 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Duration) {
+fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Duration, mut tracker: Tracks) {
     let ping_ident: u16 = rand::rng().random();
     let mut seq_cnt = (100 + no * 100) as u16;
     debug!("starting thread for {} ident={}", &hostinfo, ping_ident);
@@ -83,8 +100,10 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
     std::thread::sleep(Duration::from_millis((no * 100) as u64));
     loop {
         let now = Instant::now();
+        tracker.update_for_send(hostinfo.ip, now, ping_ident, seq_cnt);
         let res = pinger.ping1(ping_ident, seq_cnt, 255);
-        let dur = now.elapsed();
+        let recv_instant = Instant::now();
+        let dur = recv_instant - now;
         match res {
             Ok((ret_size, ret_sockaddr)) => {
                 match pinger.decode() {
@@ -107,6 +126,7 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
                             }
                             warn!("{}", &buff);
                         } else {
+                            tracker.update_for_recv(hostinfo.ip, recv_instant, ret_ident, ret_seq);
                             info!("success for {} in {:?}", hostinfo, dur);
                         }
                     },
