@@ -140,10 +140,6 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
 
     let mut buff = String::with_capacity(128);
 
-    // Align to the next interval boundary on the wall clock, same as stats.
-    // No per-thread offset — all hosts fire together on the same boundary.
-    util::sleep_until_next_interval_on(&mut stop, interval);
-
     loop {
         let now = Instant::now();
         tracker.update_for_send(hostinfo.ip, now, ping_ident, seq_cnt);
