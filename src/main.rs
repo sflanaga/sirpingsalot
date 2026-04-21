@@ -134,8 +134,12 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
                 }
             },
             Err(e)=> {
-                warn!("error for {} after {:?}, {}", hostinfo, dur, e);
-                e.chain().skip(1).for_each(|cause| warn!("\t cause: {}", cause));
+                let causes: Vec<String> = e.chain().skip(1).map(|c| c.to_string()).collect();
+                if causes.is_empty() {
+                    warn!("error for {} after {:?}, {}", hostinfo, dur, e);
+                } else {
+                    warn!("error for {} after {:?}, {} ({})", hostinfo, dur, e, causes.join("; "));
+                }
             }
         }
         std::thread::sleep(interval);
