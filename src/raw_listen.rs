@@ -3,6 +3,7 @@
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use anyhow::{Context, anyhow};
 use std::time::{Duration, SystemTime, Instant};
+use std::sync::atomic::{AtomicBool, Ordering};
 use humantime::format_rfc3339_millis;
 use clap::Parser;
 use log::{debug, error, info, trace, warn};
@@ -25,6 +26,12 @@ use std::sync::{Arc, Mutex};
 use std::collections::{HashMap, HashSet};
 use std::mem::MaybeUninit;
 
+static PRINT_STATS_NOW: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn signal_print_now(_: std::ffi::c_int) {
+    PRINT_STATS_NOW.store(true, Ordering::Relaxed);
+}
+
 fn main() {
     match run() {
         Ok(_) => {}
@@ -40,6 +47,14 @@ fn run() -> Result<(), anyhow::Error> {
     error!("starting...");
 
     let mut stop = Stop::new();
+
+    unsafe {
+        use nix::sys::signal::{signal, SigHandler, Signal};
+        signal(Signal::SIGUSR1, SigHandler::Handler(signal_print_now))
+            .expect("failed to install SIGUSR1 handler");
+        signal(Signal::SIGQUIT, SigHandler::Handler(signal_print_now))
+            .expect("failed to install SIGQUIT handler");
+    }
 
     let mut tracker = Tracks::new(&cfg)?;
 
@@ -76,7 +91,7 @@ fn run() -> Result<(), anyhow::Error> {
         let (mut stop, stats_interval) = (stop.clone(), cfg.stat_interval.clone());
         let tracker_h = std::thread::Builder::new()
             .name(String::from("stats"))
-            .spawn(move || stats_thread(tracker, stop, stats_interval))?;
+            .spawn(move || stats_thread(tracker, stop, stats_interval, cfg.reset_stats, &PRINT_STATS_NOW))?;
     } else {
         info!("no stats tracking started");
         while !stop.sleep(Duration::from_secs(60)) {}

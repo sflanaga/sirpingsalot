@@ -1,4 +1,5 @@
 use std::time::{Duration, Instant, SystemTime};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 
 use anyhow::Result;
 use humantime::format_rfc3339_millis;
@@ -19,6 +20,16 @@ mod util;
 mod cli;
 mod stop;
 
+/// Total pings sent across all threads, for the live status line.
+static PING_COUNT: AtomicU64 = AtomicU64::new(0);
+
+/// Set by SIGUSR1 or SIGQUIT to trigger an immediate stats dump.
+static PRINT_STATS_NOW: AtomicBool = AtomicBool::new(false);
+
+extern "C" fn signal_print_now(_: std::ffi::c_int) {
+    PRINT_STATS_NOW.store(true, Ordering::Relaxed);
+}
+
 fn main() {
     match run() {
         Ok(_) => {}
@@ -33,7 +44,14 @@ fn run() -> Result<()> {
     debug!("options: \n{:#?}", &cfg);
     let stop = Stop::new();
 
-    // Compute or validate stat_interval.
+    // SIGUSR1 (kill -USR1 <pid>) and SIGQUIT (Ctrl-\) both trigger an immediate stats dump.
+    unsafe {
+        use nix::sys::signal::{signal, SigHandler, Signal};
+        signal(Signal::SIGUSR1, SigHandler::Handler(signal_print_now))
+            .expect("failed to install SIGUSR1 handler");
+        signal(Signal::SIGQUIT, SigHandler::Handler(signal_print_now))
+            .expect("failed to install SIGQUIT handler");
+    }
     // 0 (the default) means auto-select the smallest value from the sequence
     // [60s, 300s, 900s, 1h, 4h, 24h] that exceeds the ping interval.
     // An explicitly provided value must be greater than the ping interval.
@@ -63,18 +81,27 @@ fn run() -> Result<()> {
         let ip: HostInfo = ip.clone();
         let (interval, timeout) = (cfg.interval, cfg.timeout);
         let tracker = tracker.clone();
+        let stop = stop.clone();
         threads.push(std::thread::Builder::new()
             .name(format!("ping{}", no))
-            .spawn(move || ping_thread(ip, no, interval, timeout, tracker))?);
+            .spawn(move || ping_thread(ip, no, interval, timeout, tracker, stop))?);
     }
     debug!("all ping threads started");
 
     {
         let stop = stop.clone();
-        debug!("starting stats thread with interval {:?}", stat_interval);
+        let reset = cfg.reset_stats;
+        debug!("starting stats thread with interval {:?} reset={}", stat_interval, reset);
         let _tracker_h = std::thread::Builder::new()
             .name(String::from("stats"))
-            .spawn(move || stats::stats_thread(tracker, stop, stat_interval))?;
+            .spawn(move || stats::stats_thread(tracker, stop, stat_interval, reset, &PRINT_STATS_NOW))?;
+    }
+
+    if util::STDERR_IS_TERMINAL.load(Ordering::Relaxed) {
+        let stop = stop.clone();
+        std::thread::Builder::new()
+            .name(String::from("status"))
+            .spawn(move || status_thread(stop))?;
     }
 
     for h in threads {
@@ -83,7 +110,22 @@ fn run() -> Result<()> {
     Ok(())
 }
 
-fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Duration, mut tracker: Tracks) {
+fn status_thread(stop: Stop) {
+    use std::io::Write;
+    loop {
+        let count = PING_COUNT.load(Ordering::Relaxed);
+        let _ = write!(std::io::stderr(), "\rPings: {:<10}", count);
+        let _ = std::io::stderr().flush();
+        if stop.sleep(Duration::from_millis(500)) {
+            // clear the status line on exit
+            let _ = write!(std::io::stderr(), "\r{:80}\r", "");
+            let _ = std::io::stderr().flush();
+            break;
+        }
+    }
+}
+
+fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Duration, mut tracker: Tracks, mut stop: Stop) {
     let ping_ident: u16 = rand::rng().random();
     let mut seq_cnt = (100 + no * 100) as u16;
     debug!("starting thread for {} ident={}", &hostinfo, ping_ident);
@@ -97,7 +139,23 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
     };
 
     let mut buff = String::with_capacity(128);
-    std::thread::sleep(Duration::from_millis((no * 100) as u64));
+
+    // Align to the next interval boundary on the wall clock (same mechanism as stats).
+    // Each thread is offset slightly so all hosts don't fire simultaneously.
+    {
+        let now = SystemTime::now();
+        let ep = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
+        // Spread threads evenly within one interval using their index.
+        let n_hosts = 1.max(tracker.host_count()) as u64;
+        let offset = Duration::from_nanos(
+            (no as u64 * interval.as_nanos() as u64 / n_hosts) as u64
+        );
+        let phase = ep + offset;
+        let next_ns = (phase.as_nanos() / interval.as_nanos() + 1) * interval.as_nanos();
+        let sleep_ns = next_ns - phase.as_nanos();
+        std::thread::sleep(Duration::from_nanos(sleep_ns as u64));
+    }
+
     loop {
         let now = Instant::now();
         tracker.update_for_send(hostinfo.ip, now, ping_ident, seq_cnt);
@@ -142,8 +200,11 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
                 }
             }
         }
-        std::thread::sleep(interval);
+        if util::sleep_until_next_interval_on(&mut stop, interval) {
+            break;
+        }
         seq_cnt = seq_cnt.wrapping_add(1);
+        PING_COUNT.fetch_add(1, Ordering::Relaxed);
 
     }
 

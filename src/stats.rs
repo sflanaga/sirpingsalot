@@ -8,7 +8,7 @@ use log::{debug, error, info, trace, warn};
 use anyhow::{Context, anyhow};
 
 
-use crate::util::sleep_until_next_interval_on;
+use crate::util::{sleep_until_next_interval_on, sleep_until_next_interval_or_trigger};
 use std::fmt;
 use crate::cli::{HostInfo, Config};
 use crate::stop::Stop;
@@ -61,6 +61,18 @@ impl Stats {
         }
     }
 
+    pub fn snapshot(&self) -> StatsSnapShot {
+        StatsSnapShot {
+            reply: self.reply.load(Ordering::Relaxed),
+            non_reply: self.non_reply.load(Ordering::Relaxed),
+            timeout: self.timeout.load(Ordering::Relaxed),
+            time_sum_us: self.time_sum_us.load(Ordering::Relaxed),
+            time_sum_sq_us: self.time_sum_sq_us.load(Ordering::Relaxed),
+            time_min_us: self.time_min_us.load(Ordering::Relaxed),
+            time_max_us: self.time_max_us.load(Ordering::Relaxed),
+        }
+    }
+
     pub fn update_micros_working(&self, micros: u64) {
         self.reply.fetch_add(1, Ordering::Relaxed);
         self.time_sum_us.fetch_add(micros, Ordering::Relaxed);
@@ -85,17 +97,19 @@ impl Stats {
 impl Stats {
 }
 
-pub fn stats_thread(mut tracker: Tracks, mut running: Stop, interval:Duration) {
+pub fn stats_thread(mut tracker: Tracks, mut running: Stop, interval: Duration, reset: bool, trigger: &'static AtomicBool) {
     use tabular::{Table, Row};
     loop {
-        let stop =  sleep_until_next_interval_on(&mut running, interval);
+        let (stopped, triggered) = sleep_until_next_interval_or_trigger(&mut running, interval, trigger);
 
-        let table = tracker.create_stats_table();
-        if stop {
+        let table = tracker.create_stats_table(reset);
+        if stopped {
             error!("FINAL/EARLY dump of STATS:\n{}", table);
             std::process::exit(0);
+        } else if triggered {
+            error!("STATS (on-demand):\n{}", table);
         } else {
-            error!("STATS:\n{}", table);
+            error!("STATS{}:\n{}", if reset { " (interval)" } else { " (cumulative)" }, table);
         }
     }
 }
@@ -157,6 +171,10 @@ impl Tracks {
         })
     }
 
+    pub fn host_count(&self) -> usize {
+        self.inner.lock().unwrap().map.len()
+    }
+
     pub fn update_for_recv(&mut self, ip: IpAddr, now: Instant, ident: u16, seq: u16) -> bool {
         let mut lock = self.inner.lock().unwrap();
         if let Some(per_host) = lock.map.get_mut(&ip) {
@@ -206,7 +224,7 @@ impl Tracks {
     }
 
 
-    pub fn create_stats_table(&mut self) -> Table {
+    pub fn create_stats_table(&mut self, reset: bool) -> Table {
         let mut table = Table::new("\t{:<} {:>} {:>} {:>} {:>} {:>} {:>} {:>}");
         table.add_row(Row::new()
             .with_cell("host")
@@ -222,7 +240,14 @@ impl Tracks {
         {
             let stat_vec = self.inner.lock().unwrap()
                 .map.iter_mut()
-                .map(|(ip, v)| (ip.clone(), v.host.clone(), v.stats.zero_extract())).collect::<Vec<_>>();
+                .map(|(ip, v)| {
+                    let snap = if reset {
+                        v.stats.zero_extract()
+                    } else {
+                        v.stats.snapshot()
+                    };
+                    (ip.clone(), v.host.clone(), snap)
+                }).collect::<Vec<_>>();
             for (_ip, h, stat) in stat_vec.iter() {
                 let count = stat.reply + stat.non_reply;
                 if count > 0 {

@@ -40,6 +40,10 @@ pub struct Config {
     /// log level
     pub ident_base: u16,
 
+    #[arg(short = 'R')]
+    /// reset stats after each print interval (default: print cumulative stats since start)
+    pub reset_stats: bool,
+
 }
 
 pub fn to_addr(s: &str) -> ResultS<HostInfo> {

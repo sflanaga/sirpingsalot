@@ -29,3 +29,4 @@ socket2 = { version = "0.5", features = ["all"] }
 clap = { version = "4", features = ["derive"] }
 tabular = "0.2"
 ctrlc = { version = "3", features = ["termination"] }
+nix = { version = "0.31", features = ["signal"] }
