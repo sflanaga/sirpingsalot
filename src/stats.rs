@@ -36,6 +36,23 @@ pub struct StatsSnapShot {
     time_max_us: u64,
 }
 
+/// One contiguous run of consecutive timeouts/non-replies for a single host.
+pub struct OutageRange {
+    pub start: SystemTime,
+    pub end: Option<SystemTime>,  // None = still ongoing
+    pub count: u32,
+}
+
+fn instant_to_system_time(t: Instant) -> SystemTime {
+    let now_i = Instant::now();
+    let now_s = SystemTime::now();
+    if t <= now_i {
+        now_s - (now_i - t)
+    } else {
+        now_s + (t - now_i)
+    }
+}
+
 impl Stats {
     pub fn new() -> Stats {
         Stats {
@@ -98,18 +115,17 @@ impl Stats {
 }
 
 pub fn stats_thread(mut tracker: Tracks, mut running: Stop, interval: Duration, reset: bool, trigger: &'static AtomicBool) {
-    use tabular::{Table, Row};
     loop {
         let (stopped, triggered) = sleep_until_next_interval_or_trigger(&mut running, interval, trigger);
 
-        let table = tracker.create_stats_table(reset);
+        let report = tracker.create_report(reset);
         if stopped {
-            error!("FINAL/EARLY dump of STATS:\n{}", table);
+            error!("FINAL/EARLY dump of STATS:\n{}", report);
             std::process::exit(0);
         } else if triggered {
-            error!("STATS (on-demand):\n{}", table);
+            error!("STATS (on-demand):\n{}", report);
         } else {
-            error!("STATS{}:\n{}", if reset { " (interval)" } else { " (cumulative)" }, table);
+            error!("STATS{}:\n{}", if reset { " (interval)" } else { " (cumulative)" }, report);
         }
     }
 }
@@ -121,6 +137,14 @@ struct TrackPerHost {
     last_seq: Option<u16>,
     mark: bool,
     stats: Stats,
+    /// SystemTime of the most recent send (used as outage start when a miss is first detected).
+    last_send_stime: Option<SystemTime>,
+    /// Start time of the current open outage streak (None if no active streak).
+    outage_streak_start: Option<SystemTime>,
+    /// Number of consecutive missed pings in the current open streak.
+    outage_streak_count: u32,
+    /// Completed (closed) outage ranges.
+    completed_outages: Vec<OutageRange>,
 }
 
 struct TracksInner {
@@ -162,6 +186,10 @@ impl Tracks {
                     ident,
                     mark: false,
                     stats: Stats::new(),
+                    last_send_stime: None,
+                    outage_streak_start: None,
+                    outage_streak_count: 0,
+                    completed_outages: Vec::new(),
                 });
             }
             ident = ident.wrapping_add(1);
@@ -189,6 +217,15 @@ impl Tracks {
             let dur = now - per_host.last_time.expect("was supposed to have sometime");
             per_host.stats.update_micros_working(dur.as_micros() as u64);
             debug!("success for {} time: {:?}", per_host.host, dur);
+            // Close any open outage streak.
+            if let Some(start) = per_host.outage_streak_start.take() {
+                per_host.completed_outages.push(OutageRange {
+                    start,
+                    end: Some(instant_to_system_time(now)),
+                    count: per_host.outage_streak_count,
+                });
+                per_host.outage_streak_count = 0;
+            }
             per_host.mark = true;
             true
         } else {
@@ -202,7 +239,13 @@ impl Tracks {
         if !per_host.mark && per_host.last_seq.is_some() {
             info!("timeout for {} missed seq {}", per_host.host, per_host.last_seq.unwrap());
             per_host.stats.update_fail();
+            // Open or extend the outage streak.
+            if per_host.outage_streak_start.is_none() {
+                per_host.outage_streak_start = per_host.last_send_stime;
+            }
+            per_host.outage_streak_count += 1;
         }
+        per_host.last_send_stime = Some(SystemTime::now());
         per_host.last_seq = Some(seq);
         per_host.last_time = Some(now);
         per_host.mark = false;
@@ -210,13 +253,19 @@ impl Tracks {
     }
 
     pub fn update_for_send_bulk(&mut self, v: &Vec<UpdateSendIteration>, seq: u16) {
+        let now_s = SystemTime::now();
         let mut lock = self.inner.lock().unwrap();
         for i in v.iter() {
             let mut per_host = lock.map.get_mut(&i.ip).expect("hey - this ip should be there but is not");
             if !per_host.mark && per_host.last_seq.is_some() {
                 info!("timeout for {} missed seq {}", per_host.host, per_host.last_seq.unwrap());
                 per_host.stats.update_fail();
+                if per_host.outage_streak_start.is_none() {
+                    per_host.outage_streak_start = per_host.last_send_stime;
+                }
+                per_host.outage_streak_count += 1;
             }
+            per_host.last_send_stime = Some(now_s);
             per_host.last_seq = Some(seq);
             per_host.last_time = Some(i.now);
             per_host.mark = false;
@@ -224,7 +273,11 @@ impl Tracks {
     }
 
 
-    pub fn create_stats_table(&mut self, reset: bool) -> Table {
+    pub fn create_report(&mut self, reset: bool) -> String {
+        use std::fmt::Write as FmtWrite;
+        let mut out = String::new();
+        let now_s = SystemTime::now();
+
         let mut table = Table::new("\t{:<} {:>} {:>} {:>} {:>} {:>} {:>} {:>}");
         table.add_row(Row::new()
             .with_cell("host")
@@ -236,56 +289,98 @@ impl Tracks {
             .with_cell("max(ms)")
             .with_cell("stdev(ms)")
         );
-        let _st = SystemTime::now();
-        {
-            let stat_vec = self.inner.lock().unwrap()
-                .map.iter_mut()
-                .map(|(ip, v)| {
-                    let snap = if reset {
-                        v.stats.zero_extract()
-                    } else {
-                        v.stats.snapshot()
-                    };
-                    (ip.clone(), v.host.clone(), snap)
-                }).collect::<Vec<_>>();
-            for (_ip, h, stat) in stat_vec.iter() {
-                let count = stat.reply + stat.non_reply;
-                if count > 0 {
-                    let avg_ms = (stat.time_sum_us as f64 / count as f64) / 1000.0;
-                    let min_ms = stat.time_min_us as f64 / 1000.0;
-                    let max_ms = stat.time_max_us as f64 / 1000.0;
-                    let stdev_ms = if count >= 2 {
-                        let avg_us = stat.time_sum_us as f64 / count as f64;
-                        let mean_sq = stat.time_sum_sq_us as f64 / count as f64;
-                        let var = (mean_sq - avg_us * avg_us).max(0.0);
-                        format!("{:.3}", var.sqrt() / 1000.0)
-                    } else {
-                        "NA".to_string()
-                    };
-                    table.add_row(Row::new()
-                        .with_cell(&h)
-                        .with_cell(stat.reply)
-                        .with_cell(stat.non_reply)
-                        .with_cell(stat.timeout)
-                        .with_cell(format!("{:.3}", avg_ms))
-                        .with_cell(format!("{:.3}", min_ms))
-                        .with_cell(format!("{:.3}", max_ms))
-                        .with_cell(stdev_ms));
+
+        // Collect per-host data under the lock, then release before formatting.
+        struct HostData {
+            host: HostInfo,
+            stat: StatsSnapShot,
+            outages: Vec<OutageRange>,
+            open_outage: Option<(SystemTime, u32)>,  // (start, count) if still ongoing
+        }
+        let host_data: Vec<HostData> = {
+            let mut lock = self.inner.lock().unwrap();
+            lock.map.iter_mut().map(|(_ip, v)| {
+                let stat = if reset { v.stats.zero_extract() } else { v.stats.snapshot() };
+                // Snapshot the open streak (don't close it — host may still be down).
+                let open_outage = v.outage_streak_start.map(|s| (s, v.outage_streak_count));
+                // Drain completed outages; in cumulative mode leave them in place.
+                let outages = if reset {
+                    std::mem::take(&mut v.completed_outages)
                 } else {
-                    table.add_row(Row::new()
-                        .with_cell(&h)
-                        .with_cell(stat.reply)
-                        .with_cell(stat.non_reply)
-                        .with_cell(stat.timeout)
-                        .with_cell("NA")
-                        .with_cell("NA")
-                        .with_cell("NA")
-                        .with_cell("NA")
-                    );
+                    v.completed_outages.iter().map(|o| OutageRange {
+                        start: o.start,
+                        end: o.end,
+                        count: o.count,
+                    }).collect()
+                };
+                HostData { host: v.host.clone(), stat, outages, open_outage }
+            }).collect()
+        };
+
+        // Build outage section (only if any host has outage data).
+        let any_outages = host_data.iter().any(|h| !h.outages.is_empty() || h.open_outage.is_some());
+        if any_outages {
+            let _ = writeln!(out, "\tOUTAGES:");
+            for hd in &host_data {
+                if hd.outages.is_empty() && hd.open_outage.is_none() {
+                    continue;
                 }
+                let _ = write!(out, "\t  {}:", hd.host);
+                for o in &hd.outages {
+                    let end_str = match o.end {
+                        Some(t) => format_rfc3339_millis(t).to_string(),
+                        None    => "ongoing".to_string(),
+                    };
+                    let _ = write!(out, " [{} -> {}, {} missed]",
+                        format_rfc3339_millis(o.start), end_str, o.count);
+                }
+                if let Some((start, count)) = hd.open_outage {
+                    let _ = write!(out, " [{} -> ongoing, {} missed]",
+                        format_rfc3339_millis(start), count);
+                }
+                let _ = writeln!(out);
             }
         }
-        table
+
+        // Build stats table.
+        for hd in &host_data {
+            let stat = &hd.stat;
+            let count = stat.reply + stat.non_reply;
+            if count > 0 {
+                let avg_ms = (stat.time_sum_us as f64 / count as f64) / 1000.0;
+                let min_ms = stat.time_min_us as f64 / 1000.0;
+                let max_ms = stat.time_max_us as f64 / 1000.0;
+                let stdev_ms = if count >= 2 {
+                    let avg_us = stat.time_sum_us as f64 / count as f64;
+                    let mean_sq = stat.time_sum_sq_us as f64 / count as f64;
+                    let var = (mean_sq - avg_us * avg_us).max(0.0);
+                    format!("{:.3}", var.sqrt() / 1000.0)
+                } else {
+                    "NA".to_string()
+                };
+                table.add_row(Row::new()
+                    .with_cell(&hd.host)
+                    .with_cell(stat.reply)
+                    .with_cell(stat.non_reply)
+                    .with_cell(stat.timeout)
+                    .with_cell(format!("{:.3}", avg_ms))
+                    .with_cell(format!("{:.3}", min_ms))
+                    .with_cell(format!("{:.3}", max_ms))
+                    .with_cell(stdev_ms));
+            } else {
+                table.add_row(Row::new()
+                    .with_cell(&hd.host)
+                    .with_cell(stat.reply)
+                    .with_cell(stat.non_reply)
+                    .with_cell(stat.timeout)
+                    .with_cell("NA")
+                    .with_cell("NA")
+                    .with_cell("NA")
+                    .with_cell("NA"));
+            }
+        }
+        let _ = write!(out, "{}", table);
+        out
     }
 }
 
