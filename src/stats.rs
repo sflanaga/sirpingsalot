@@ -178,7 +178,7 @@ impl Tracks {
     pub fn update_for_recv(&mut self, ip: IpAddr, now: Instant, ident: u16, seq: u16) -> bool {
         let mut lock = self.inner.lock().unwrap();
         if let Some(per_host) = lock.map.get_mut(&ip) {
-            if per_host.ident == ident {
+            if per_host.ident != ident {
                 info!("ident difference for {} expected: {} got {}", per_host.host,
                       per_host.ident, ident);
             }

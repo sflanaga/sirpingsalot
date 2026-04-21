@@ -140,21 +140,9 @@ fn ping_thread(hostinfo: HostInfo, no: usize, interval: Duration, timeout: Durat
 
     let mut buff = String::with_capacity(128);
 
-    // Align to the next interval boundary on the wall clock (same mechanism as stats).
-    // Each thread is offset slightly so all hosts don't fire simultaneously.
-    {
-        let now = SystemTime::now();
-        let ep = now.duration_since(SystemTime::UNIX_EPOCH).unwrap();
-        // Spread threads evenly within one interval using their index.
-        let n_hosts = 1.max(tracker.host_count()) as u64;
-        let offset = Duration::from_nanos(
-            (no as u64 * interval.as_nanos() as u64 / n_hosts) as u64
-        );
-        let phase = ep + offset;
-        let next_ns = (phase.as_nanos() / interval.as_nanos() + 1) * interval.as_nanos();
-        let sleep_ns = next_ns - phase.as_nanos();
-        std::thread::sleep(Duration::from_nanos(sleep_ns as u64));
-    }
+    // Align to the next interval boundary on the wall clock, same as stats.
+    // No per-thread offset — all hosts fire together on the same boundary.
+    util::sleep_until_next_interval_on(&mut stop, interval);
 
     loop {
         let now = Instant::now();
